@@ -244,6 +244,27 @@ def test_stale_or_corrupt_fingerprint_cache_is_rebuilt(tmp_path, base_config, fa
     assert read_cached_json(cache_path, key) == [123, 456, 789]
 
 
+@pytest.mark.parametrize("cached_data", [[], [123, 456]])
+def test_keyed_empty_or_truncated_fingerprint_cache_is_rebuilt(tmp_path, base_config, fake_toolchain, monkeypatch, cached_data):
+    item = _filesystem_variant(tmp_path)
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    config.cache_dir.joinpath("dedupe_v2").mkdir(parents=True)
+    key = v2_variant_fingerprint_cache_key(
+        {"absolute_path": str(item.source_file.resolve()), "size": 6, "mtime": item.source_file.stat().st_mtime},
+        variant_id=item.variant_id, parent_candidate_id=item.parent_candidate_id, ranges=[(0.0, 4.0)],
+        interval=config.fingerprint_interval, detector_version=config.payoff_detector_version,
+        ffmpeg_version=fake_toolchain.ffmpeg_version, ffmpeg_path=str(fake_toolchain.ffmpeg.resolve(strict=False)),
+    )
+    cache_path = config.cache_dir / "dedupe_v2" / f"{key}.json"
+    cache_path.write_text(json.dumps({"cache_key": key, "data": cached_data}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr("montage.dedupe._fingerprint_segment", lambda *args: (calls.append(args) or [123, 456, 789]))
+
+    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [123, 456, 789]
+    assert len(calls) == 1
+    assert read_cached_json(cache_path, key) == [123, 456, 789]
+
+
 def test_fingerprint_enforces_raw_source_match_and_work_cache_boundary(tmp_path, base_config, fake_toolchain, monkeypatch):
     item = _filesystem_variant(tmp_path)
     config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")

@@ -58,6 +58,18 @@ def fingerprint_candidate(candidate: Candidate, source_for_analysis: Path, toolc
     return [_dhash(np.frombuffer(data[offset : offset + frame_size], dtype=np.uint8)) for offset in range(0, len(data) - frame_size + 1, frame_size)]
 
 
+def _expected_fingerprint_count(variant: CandidateVariant, interval: float) -> int:
+    return sum(max(2, min(16, int(segment.duration / interval) + 1)) for segment in variant.source_segments)
+
+
+def _is_complete_fingerprint(value: object, expected_count: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == expected_count
+        and all(isinstance(item, int) and not isinstance(item, bool) and 0 <= item < (1 << 56) for item in value)
+    )
+
+
 def _fingerprint_segment(
     source_for_analysis: Path, start: float, duration: float, interval: float, toolchain: Toolchain
 ) -> list[int]:
@@ -96,6 +108,7 @@ def fingerprint_variant(
     interval = config.fingerprint_interval
     if interval <= 0:
         raise ValueError("fingerprint_interval must be positive")
+    expected_count = _expected_fingerprint_count(variant, interval)
     source_fingerprint = file_fingerprint(source_for_analysis)
     key = v2_variant_fingerprint_cache_key(
         source_fingerprint,
@@ -112,13 +125,15 @@ def fingerprint_variant(
         raise ValueError(f"V2 fingerprint cache must remain below work_dir: {cache_root}")
     cache_path = cache_root / "dedupe_v2" / f"{key}.json"
     cached = read_cached_json(cache_path, key)
-    if isinstance(cached, list) and all(isinstance(value, int) for value in cached):
+    if _is_complete_fingerprint(cached, expected_count):
         return list(cached)
     values = [
         fingerprint
         for segment in variant.source_segments
         for fingerprint in _fingerprint_segment(source_for_analysis, segment.source_in, segment.duration, interval, toolchain)
     ]
+    if not _is_complete_fingerprint(values, expected_count):
+        raise RuntimeError(f"computed fingerprint expected {expected_count} values, got {len(values)}")
     write_cached_json(cache_path, key, values)
     return values
 
