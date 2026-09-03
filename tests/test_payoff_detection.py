@@ -209,21 +209,23 @@ def test_long_candidate_refines_only_proxy_selected_source_subranges(tmp_path, f
     assert all(30.0 <= start < end <= 33.0 for start, end in refinement_ranges)
 
 
-def test_write_payoff_events_emits_auditable_json(tmp_path):
+def test_write_payoff_events_two_argument_interface_emits_auditable_json(tmp_path, monkeypatch):
     raw_dir = tmp_path / "raw"
     config = replace(test_config(), raw_dir=raw_dir, work_dir=tmp_path / "work", output_dir=tmp_path / "output")
     path = config.work_dir / "analysis" / "payoff_events_v2.json"
-    write_payoff_events([make_event("synthetic", 12.43, 0.84)], path, config)
+    monkeypatch.setattr("montage.payoff_detection._default_writer_config", lambda: config, raising=False)
+    write_payoff_events([make_event("synthetic", 12.43, 0.84)], path)
 
     payload = path.read_text(encoding="utf-8")
     assert '"event_id": "synthetic"' in payload
     assert '"source_time": 12.43' in payload
 
 
-def test_write_payoff_events_rejects_raw_destination(tmp_path):
+def test_write_payoff_events_two_argument_interface_rejects_raw_destination(tmp_path, monkeypatch):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     config = replace(test_config(), raw_dir=raw_dir, work_dir=tmp_path / "work", output_dir=tmp_path / "output")
+    monkeypatch.setattr("montage.payoff_detection._default_writer_config", lambda: config, raising=False)
 
-    with pytest.raises(ValueError, match="work"):
-        write_payoff_events([make_event("synthetic", 12.43, 0.84)], raw_dir / "payoff_events_v2.json", config)
+    with pytest.raises(ValueError):
+        write_payoff_events([make_event("synthetic", 12.43, 0.84)], raw_dir / "payoff_events_v2.json")

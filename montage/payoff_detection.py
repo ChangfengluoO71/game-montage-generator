@@ -10,7 +10,7 @@ import numpy as np
 
 from .audio_analysis import nearest_audio_evidence
 from .cache import file_fingerprint, read_cached_json, v2_cache_key, write_cached_json
-from .config import PipelineConfig, assert_source_read_only, is_within
+from .config import PipelineConfig, assert_source_read_only, is_within, load_config
 from .models import PayoffEvent, VideoAnalysis
 from .toolchain import Toolchain, run_command
 from .video_analysis import decode_color_frames
@@ -450,10 +450,21 @@ def detect_payoff_events(
     return merged_events
 
 
-def write_payoff_events(events: Sequence[PayoffEvent], path: Path, config: PipelineConfig) -> None:
+def _default_writer_config() -> PipelineConfig:
+    return load_config(Path(__file__).resolve().parents[1] / "config.yaml")
+
+
+def write_payoff_events(
+    events: Sequence[PayoffEvent],
+    path: Path,
+    config: PipelineConfig | None = None,
+) -> None:
+    active_config = config or _default_writer_config()
     if path.suffix.lower() != ".json":
         raise ValueError("payoff events must be written as JSON")
-    if not is_within(path, config.work_dir):
+    if is_within(path, active_config.raw_dir):
+        raise ValueError(f"payoff event destination cannot be below raw: {path}")
+    if not is_within(path, active_config.work_dir):
         raise ValueError(f"payoff event destination must remain below work: {path}")
     from .cache import atomic_write_json
     atomic_write_json(path, {"events": [event.to_dict() for event in events], "event_count": len(events)})
