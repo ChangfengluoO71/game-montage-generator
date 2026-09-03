@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def base_config():
-    return load_config(PROJECT_ROOT / "config.yaml")
+def base_config(tmp_path):
+    config = load_config(PROJECT_ROOT / "config.yaml")
+    return replace(
+        config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        output_dir=tmp_path / "output",
+    )
 
 
 @pytest.fixture

@@ -478,6 +478,35 @@ def test_hero_preference_has_quality_margin(tmp_path, base_config):
     assert edit.shots[-1].anchor_event_type != "hero_play"
 
 
+def test_base_config_isolates_runtime_dirs_before_beam_writes_edl(tmp_path, base_config):
+    from montage.config import load_config
+
+    project_config = load_config(base_config.config_path)
+    real_targets = (project_config.preview_v2_edit_path, project_config.preview_v2_timeline_path)
+
+    def file_state(path: Path):
+        if not path.exists():
+            return None
+        return (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
+
+    before = {path: file_state(path) for path in real_targets}
+
+    for runtime_path in (base_config.raw_dir, base_config.work_dir, base_config.output_dir):
+        assert tmp_path.resolve() in runtime_path.resolve().parents
+    assert base_config.config_path == project_config.config_path
+    assert base_config.music_file == project_config.music_file
+
+    config = replace(base_config, hero_quality_margin=0.02, beam_max_expansions=1000)
+    regular = [timeline_variant(tmp_path, index, quality=0.80) for index in range(9)]
+    weak_hero = timeline_variant(tmp_path, 99, quality=0.60, anchor_type="hero_play")
+
+    build_v2_preview_edit(regular + [weak_hero], music(), baseline_edit_for_timeline(), config)
+
+    assert config.preview_v2_edit_path.exists()
+    assert config.preview_v2_timeline_path.exists()
+    assert {path: file_state(path) for path in real_targets} == before
+
+
 def test_duration_limits_allow_documented_context_exception_only(tmp_path, base_config):
     config = replace(base_config, raw_dir=tmp_path / "raw")
     candidate = timeline_variant(tmp_path, 1, duration=11.0)
