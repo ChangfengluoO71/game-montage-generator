@@ -95,11 +95,14 @@ def _feature_runs(window: Mapping[str, float], analysis: VideoAnalysis, start: f
         analysis.times, analysis.motion, analysis.visual, analysis.audio,
         analysis.continuity, analysis.activity, start, end,
     )
-    values.update({
-        name: float(value)
-        for name, value in window.items()
-        if name in _FEATURE_RUN_NAMES and isinstance(value, (int, float))
-    })
+    core_start = float(window.get("start", start))
+    core_end = float(window.get("end", end))
+    if abs(core_start - start) <= 0.001 and abs(core_end - end) <= 0.001:
+        values.update({
+            name: float(value)
+            for name, value in window.items()
+            if name in _FEATURE_RUN_NAMES and isinstance(value, (int, float))
+        })
     return values
 
 

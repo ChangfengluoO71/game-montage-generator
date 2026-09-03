@@ -192,6 +192,41 @@ def test_normal_activity_window_derives_runs_that_reach_variant_penalties():
     assert variant.penalty_values["repetitive_fire_penalty"] > 0.0
 
 
+def test_expanded_candidate_range_overrides_stale_core_window_diagnostics():
+    source = Path("expanded-window.mp4")
+    record = MediaRecord(
+        file_path=source, file_name=source.name, file_size=1, duration=120.0, width=1920, height=1200,
+        fps=60.0, codec="h264", bitrate=None, audio_codec=None, audio_channels=None,
+        audio_sample_rate=None, creation_time=None, category="long", fingerprint={},
+    )
+    analysis = VideoAnalysis(
+        source_file=source, sample_rate=1.0, times=[float(index) for index in range(13)],
+        motion=[0.1] * 4 + [0.8] * 3 + [0.1] * 6,
+        visual=[0.1] * 4 + [0.8] * 3 + [0.1] * 6,
+        audio=[0.8] * 4 + [0.8] * 3 + [0.1] * 6,
+        continuity=[0.8] * 13,
+        activity=[0.3] * 4 + [0.9] * 3 + [0.1] * 6,
+        candidate_windows=[{
+            "start": 4.0, "end": 6.0,
+            "stationary_ads": 0.0, "same_view": 0.0, "downtime": 0.0, "repetitive_fire": 0.0,
+            "danger_escalation": 0.0, "motion": 0.8, "visual_novelty": 0.8,
+        }],
+    )
+
+    candidate = generate_candidates([record], {str(source): analysis}, test_config())[0]
+    variant = build_condensed_variants(candidate, [], make_music(), test_config())[0]
+
+    assert (candidate.source_start, candidate.source_end) == (0.0, 12.0)
+    assert candidate.feature_runs["stationary_ads"] > 0.0
+    assert candidate.feature_runs["downtime"] > 0.0
+    assert candidate.feature_runs["same_view"] > 0.0
+    assert candidate.feature_runs["repetitive_fire"] > 0.0
+    assert variant.penalty_values["stationary_ads_penalty"] > 0.0
+    assert variant.penalty_values["downtime_penalty"] > 0.0
+    assert variant.penalty_values["same_view_penalty"] > 0.0
+    assert variant.penalty_values["repetitive_fire_penalty"] > 0.0
+
+
 def test_v1_candidate_writer_excludes_v2_feature_runs(tmp_path):
     candidate = replace(make_long_candidate(), feature_runs={"stationary_ads": 0.9})
     json_path = tmp_path / "v1-candidates.json"
