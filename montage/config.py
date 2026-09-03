@@ -65,6 +65,7 @@ class PipelineConfig:
     baseline_music_max_shift: float
     audio_overlap_ms: tuple[int, int]
     impact_tail_max_ms: int
+    minimum_context_integrity: float
     v2_weights: dict[str, float]
     beam_weights: dict[str, float]
     penalty_weights: dict[str, float]
@@ -246,6 +247,7 @@ def load_config(path: Path) -> PipelineConfig:
         baseline_music_max_shift=float(raw.get("baseline_music_max_shift", 0.5)),
         audio_overlap_ms=tuple(int(v) for v in raw.get("audio_overlap_ms", [100, 250])),
         impact_tail_max_ms=int(raw.get("impact_tail_max_ms", 400)),
+        minimum_context_integrity=float(raw.get("minimum_context_integrity", 0.70)),
         v2_weights=v2_weights,
         beam_weights=beam_weights,
         penalty_weights=penalty_weights,

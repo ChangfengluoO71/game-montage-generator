@@ -13,7 +13,7 @@ import numpy as np
 
 from .cache import atomic_write_bytes
 from .config import PipelineConfig
-from .models import Candidate, MediaRecord, VideoAnalysis
+from .models import Candidate, CandidateVariant, MediaRecord, VideoAnalysis
 
 
 def _candidate_id(source: Path, start: float, end: float) -> str:
@@ -151,4 +151,29 @@ def write_candidates(candidates: Sequence[Candidate], json_path: Path, csv_path:
     writer.writeheader()
     for candidate in candidates:
         writer.writerow(candidate.to_dict())
+    atomic_write_bytes(csv_path, buffer.getvalue().encode("utf-8-sig"))
+
+
+def write_v2_candidates(variants: Sequence[CandidateVariant], json_path: Path, csv_path: Path) -> None:
+    """Write V2 candidate diagnostics, including every score component and penalty."""
+    records = [variant.to_dict() for variant in variants]
+    atomic_write_bytes(json_path, json.dumps({"candidates": records}, ensure_ascii=False, indent=2).encode("utf-8"))
+    fields = sorted({key for record in records for key in record} | {
+        "variant_id", "parent_candidate_id", "final_score", "score_components", "penalty_values",
+    } | {
+        name
+        for record in records
+        for mapping_name in ("score_components", "penalty_values")
+        for name in (record.get(mapping_name) or {})
+    })
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for record in records:
+        flattened = dict(record)
+        for name, value in (record.get("score_components") or {}).items():
+            flattened[name] = value
+        for name, value in (record.get("penalty_values") or {}).items():
+            flattened[name] = value
+        writer.writerow(flattened)
     atomic_write_bytes(csv_path, buffer.getvalue().encode("utf-8-sig"))

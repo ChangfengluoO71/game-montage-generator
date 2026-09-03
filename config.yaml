@@ -43,6 +43,7 @@ recent_environment_window: 2
 baseline_music_max_shift: 0.5
 audio_overlap_ms: [100, 250]
 impact_tail_max_ms: 400
+minimum_context_integrity: 0.70
 v2_weights:
   payoff_score: 0.25
   human_selection_prior: 0.15
@@ -62,9 +63,12 @@ beam_weights:
   energy_curve_fit: 0.10
 penalty_weights:
   stationary_ads: 1.0
+  same_view: 1.0
   downtime: 1.0
   no_payoff: 1.0
   repetitive_fire: 1.0
+  same_source_recent: 1.0
+  same_environment_recent: 1.0
 roi_profile:
   version: 2
   reward_score: [0.35, 0.04, 0.65, 0.26]

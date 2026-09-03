@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Sequence
 
 from .config import PipelineConfig
-from .models import Candidate
+from .models import Candidate, CandidateVariant, PayoffEvent
 
 
 def _clamp(value: float) -> float:
@@ -29,3 +29,71 @@ def score_candidates(candidates: Sequence[Candidate], config: PipelineConfig) ->
         final_score = sum(float(weights.get(key, 0.0)) * value for key, value in values.items())
         scored.append(replace(candidate, final_score=round(final_score, 6)))
     return scored
+
+
+_PENALTY_FEATURES = {
+    "stationary_ads_penalty": "stationary_ads",
+    "same_view_penalty": "same_view",
+    "downtime_penalty": "downtime",
+    "no_payoff_penalty": "no_payoff",
+    "repetitive_fire_penalty": "repetitive_fire",
+    "same_source_recent_penalty": "same_source_recent",
+    "same_environment_recent_penalty": "same_environment_recent",
+}
+
+
+def _feature(features: dict[str, float], *names: str) -> float:
+    return _clamp(next((features[name] for name in names if name in features), 0.0))
+
+
+def calculate_penalties(
+    features: dict[str, float], events: Sequence[PayoffEvent], config: PipelineConfig
+) -> dict[str, float]:
+    """Return auditable, payoff-aware editorial penalties for one candidate variant."""
+    payoff_present = bool(events)
+    stationary_ads = _feature(features, "stationary_ads")
+    low_motion = 1.0 - _feature(features, "motion")
+    low_novelty = 1.0 - _feature(features, "visual_novelty", "visual_activity")
+    low_escalation = 1.0 - _feature(features, "danger_escalation", "danger_score")
+    stationary = stationary_ads * low_motion * low_novelty * low_escalation if not payoff_present else 0.0
+    repetitive_fire = _feature(features, "repetitive_fire", "repetitive_fire_run")
+    downtime = _feature(features, "downtime", "downtime_run")
+    same_view = _feature(features, "same_view", "same_view_run")
+    penalties = {
+        "stationary_ads_penalty": stationary,
+        "same_view_penalty": same_view * (1.0 - 0.5 * _feature(features, "motion")),
+        "downtime_penalty": downtime * (1.0 - 0.65 * float(payoff_present)),
+        "no_payoff_penalty": 0.12 if not payoff_present else 0.0,
+        "repetitive_fire_penalty": repetitive_fire * (1.0 - 0.75 * float(payoff_present)),
+        "same_source_recent_penalty": _feature(features, "same_source_recent"),
+        "same_environment_recent_penalty": _feature(features, "same_environment_recent"),
+    }
+    return {
+        name: round(_clamp(value) * float(config.penalty_weights.get(_PENALTY_FEATURES[name], 1.0)), 6)
+        for name, value in penalties.items()
+    }
+
+
+def score_variant(variant: CandidateVariant, config: PipelineConfig) -> CandidateVariant:
+    """Apply the configured V1.1 weighted score and subtract explicit diagnostics."""
+    values = {
+        "payoff_score": variant.payoff_score,
+        "human_selection_prior": variant.human_selection_prior,
+        "combat_intensity": variant.combat_intensity,
+        "action_density": variant.action_density,
+        "continuity": variant.continuity,
+        "visual_novelty": variant.visual_novelty,
+        "motion": variant.motion,
+        "audio_activity": variant.audio_activity,
+        "danger_score": variant.danger_score,
+        "uniqueness": variant.uniqueness,
+    }
+    weighted = {name: round(_clamp(value) * float(config.v2_weights.get(name, 0.0)), 6) for name, value in values.items()}
+    penalties = {name: _clamp(value) for name, value in variant.penalty_values.items()}
+    components = {**weighted, **penalties}
+    final_score = _clamp(sum(weighted.values()) - sum(penalties.values()))
+    return replace(
+        variant,
+        final_score=round(final_score, 6),
+        score_components=components,
+    )

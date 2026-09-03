@@ -206,11 +206,34 @@ class CandidateVariant(Serializable):
     weapon_or_view_signature: str
     condense_reason: str
     rationale: str
+    score_components: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.source_segments:
             raise ValueError("candidate variant requires at least one source segment")
+        if len(self.source_segments) > 2:
+            raise ValueError("candidate variant supports at most two source segments")
+        if any(segment.source != self.source_file for segment in self.source_segments):
+            raise ValueError("candidate variant source segments must use the parent source")
+        if any(
+            following.source_in < previous.source_out
+            for previous, following in zip(self.source_segments, self.source_segments[1:])
+        ):
+            raise ValueError("candidate variant source segments must be chronological and non-overlapping")
+        allowed_reasons = {
+            "downtime_removed",
+            "phrase_boundary",
+            "bar_boundary",
+            "action_phase_change",
+            "substantial_spatial_change",
+            "substantial_state_change",
+        }
+        if len(self.source_segments) == 2 and self.condense_reason not in allowed_reasons:
+            raise ValueError("two source segments require an explicit valid condense_reason")
+        if len(self.source_segments) == 1 and self.condense_reason:
+            raise ValueError("continuous candidate variant cannot have a condense_reason")
         object.__setattr__(self, "penalty_values", MappingProxyType(dict(self.penalty_values)))
+        object.__setattr__(self, "score_components", MappingProxyType(dict(self.score_components)))
 
 
 @dataclass(frozen=True)
