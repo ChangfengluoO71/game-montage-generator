@@ -115,6 +115,9 @@ class CandidateVariant:
     weapon_or_view_signature: str
     condense_reason: str
     rationale: str
+    rapid_multikill_score: float = 0.0
+    rapid_multikill_bonus: float = 0.0
+    score_components: dict[str, float] = field(default_factory=dict)
 ~~~
 
 V2EditShot extends the V1 shot fields with source_segments, parent_candidate_id, variant_id, payoff_events, anchor_event_time, anchor_event_type, anchor_event_strength, anchor_event_confidence, primary_anchor, secondary_anchors, context_integrity_score, condense_reason, event_timeline, event_sync_offset, cut_sync_offset, transition_compatibility_score, impact_cut, audio_j_cut_ms, and audio_l_cut_ms. V2EditDecisionList stores kind, music_source, baseline_music_in/out, V2 music_in/out, music_reason, duration, and an ordered tuple of V2EditShot values.
@@ -165,7 +168,7 @@ def test_baseline_guard_detects_change(tmp_path):
 ~~~
 
 - [ ] **Step 2: Run D:/miniconda/python.exe -m pytest -q tests/test_v2_contracts.py and confirm failure because the V2 fields/helpers are absent.**
-- [ ] **Step 3: Add config values: baseline_music_in/out 19.0/74.252, v2_output_name preview_60s_v2.mp4, payoff_analysis_fps 6.0, event_merge_window_ms 700, strong/weak thresholds 0.75/0.55, max_anchor_count_per_candidate 3, preferred macro duration 2–10s, hero maximum 12s, beam_width 16, beam_max_expansions 32, recent source/environment windows 2, baseline_music_max_shift 0.5, audio overlap 100–250ms, impact tail maximum 400ms, all v2_weights, beam_weights, penalty_weights, and normalized roi_profile values.**
+- [ ] **Step 3: Add config values: baseline_music_in/out 19.0/74.252, v2_output_name preview_60s_v2.mp4, payoff_analysis_fps 6.0, event_merge_window_ms 700, strong/weak thresholds 0.75/0.55, max_anchor_count_per_candidate 3, preferred macro duration 2–10s, hero maximum 12s, beam_width 16, beam_max_expansions 32, recent source/environment windows 2, baseline_music_max_shift 0.5, audio overlap 100–250ms, impact tail maximum 400ms, rapid_multikill_window_s 4.0, rapid_multikill_min_events 2, rapid_multikill_bonus_weight 0.12, all v2_weights, beam_weights, penalty_weights, and normalized roi_profile values.**
 - [ ] **Step 4: Implement immutable dataclasses and serialization. Require at least one source segment and validate each segment duration against source_out - source_in within 1ms. Preserve payoff_events and anchor event metadata. Serialize paths as absolute strings and tuples as arrays.**
 - [ ] **Step 5: Implement baseline_manifest with resolved path, size, mtime, and SHA-256. Implement v2_cache_key from sorted JSON containing source fingerprint, stage/version, FFmpeg version, and parameters.**
 - [ ] **Step 6: Run the focused test again, run git diff --check, and commit:**
@@ -290,6 +293,7 @@ git commit -m "feat: detect and fuse payoff events"
 - build_condensed_variants(candidate: Candidate, events: Sequence[PayoffEvent], music: MusicAnalysis, config: PipelineConfig) -> list[CandidateVariant].
 - calculate_penalties(features: dict[str, float], events: Sequence[PayoffEvent], config: PipelineConfig) -> dict[str, float].
 - score_variant(variant: CandidateVariant, config: PipelineConfig) -> CandidateVariant.
+- rapid_multikill_score(events: Sequence[PayoffEvent], window_s: float, minimum_events: int) -> float.
 - write_v2_candidates(variants: Sequence[CandidateVariant], json_path: Path, csv_path: Path) -> None.
 - Penalty output includes stationary_ads_penalty, same_view_penalty, downtime_penalty, no_payoff_penalty, repetitive_fire_penalty, same_source_recent_penalty, and same_environment_recent_penalty.
 
@@ -321,7 +325,7 @@ def test_two_segment_condense_requires_reason():
 - [ ] **Step 3: Select primary/secondary anchors using strength, semantic importance, candidate position, music opportunity, and context cost. Do not use maximum confidence as the sole rule.**
 - [ ] **Step 4: For candidates over 12 seconds, generate one continuous anchor-centered 3–10 second variant with setup/action/payoff/tail. Generate at most one additional source range only when measured downtime, phrase/bar boundary, action phase, spatial change, or state change proves a jump cut. Record condense_reason and reject context scores below the configured minimum.**
 - [ ] **Step 5: Calculate stationary ADS penalty only when low motion, low novelty, no payoff, and no danger escalation co-occur. Reduce it for kill sequences, explosions, survival, or escalation. Calculate downtime, no-payoff, same-view, and repetitive-fire diagnostics from explicit feature runs.**
-- [ ] **Step 6: Score with exactly the configured V1.1 weights: payoff .25, human prior .15, combat .12, action density .12, continuity .10, visual novelty .08, motion .06, audio .05, danger .04, uniqueness .03. Subtract penalties, clamp to [0, 1], and write every component to JSON/CSV.**
+- [ ] **Step 6: Score with exactly the configured V1.1 base weights: payoff .25, human prior .15, combat .12, action density .12, continuity .10, visual novelty .08, motion .06, audio .05, danger .04, uniqueness .03. Add the explicit capped rapid-multikill bonus configured below after the base weighted score, then subtract penalties, clamp to [0, 1], and write every component to JSON/CSV.**
 - [ ] **Step 7: Run focused tests and commit:**
 
 ~~~powershell
@@ -329,12 +333,15 @@ git add montage/condense.py montage/candidate.py montage/ranking.py montage/mode
 git commit -m "feat: add payoff-aware candidate condensation"
 ~~~
 
-## Task 5: Dedupe condensed variants and retain saved-short preference
+## Task 5: Dedupe condensed variants, retain saved-short preference, and amplify rapid multi-kill payoff
 
 **Files:**
 - Modify: montage/dedupe.py
 - Modify: montage/cache.py
 - Modify: montage/models.py
+- Modify: montage/ranking.py
+- Modify: montage/config.py
+- Modify: config.yaml
 - Create: tests/test_v2_dedupe.py
 
 **Interfaces:**
@@ -343,13 +350,15 @@ git commit -m "feat: add payoff-aware candidate condensation"
 - choose_v2_representative(group: Sequence[CandidateVariant], purpose: Literal["fast", "full"]) -> CandidateVariant.
 - fingerprint_variant(variant: CandidateVariant, source_for_analysis: Path, toolchain: Toolchain, config: PipelineConfig) -> list[int].
 - write_v2_dedupe_summary(result: V2DedupeResult, path: Path) -> None.
+- The rapid multi-kill calibration uses `rapid_multikill_window_s: 4.0`, `rapid_multikill_min_events: 2`, and a capped additive `rapid_multikill_bonus_weight: 0.12`; the base V1.1 weights remain unchanged for audit comparability.
 
-- [ ] **Step 1: Write failing tests for saved-short preference, same-parent grouping, and threshold reporting.**
+- [ ] **Step 1: Write failing tests for saved-short preference, same-parent grouping, threshold reporting, and rapid multi-kill scoring (two qualifying kill events inside the short window receive a bonus; isolated or widely separated events do not).**
 - [ ] **Step 2: Run D:/miniconda/python.exe -m pytest -q tests/test_v2_dedupe.py and confirm failure.**
 - [ ] **Step 3: Fingerprint each source segment sequence with pinned FFmpeg and v2_cache_key containing variant ID, parent ID, ranges, interval, detector version, and source fingerprint.**
 - [ ] **Step 4: Compare duration-aware visual sequences, force overlapping variants from one parent/event window into one group, record all similarities and forced-group reasons, and use threshold 0.78 for other pairs.**
 - [ ] **Step 5: For the V2 preview representative, sort human_selection_prior before payoff, context, final score, and shorter duration. Permit long context only for the future full purpose; V2 always uses fast preference.**
-- [ ] **Step 6: Run focused tests, inspect the dedupe JSON, and commit:**
+- [ ] **Step 6: Add `rapid_multikill_score` from distinct kill/multikill payoff events in a 4-second window, apply a capped 0.12 bonus after the unchanged base score, preserve the score component and bonus on the variant artifact, and verify the high-value sequence can outrank an otherwise similar isolated payoff.**
+- [ ] **Step 7: Run focused tests, inspect the dedupe JSON, and commit:**
 
 ~~~powershell
 git add montage/dedupe.py montage/cache.py montage/models.py tests/test_v2_dedupe.py
@@ -547,7 +556,7 @@ After each task, run its focused test file, inspect the diff, run git diff --che
 - Multi-evidence semantics, confidence separation, and 700ms merge: Task 3.
 - Strong/weak anchors and primary/secondary selection: Tasks 1, 4, 6, 7.
 - Context-integrity condensation and jump-cut reasons: Tasks 4, 6, 7.
-- Ranking weights and payoff-aware penalties: Task 4.
+- Ranking weights and payoff-aware penalties: Task 4; explicit rapid multi-kill emphasis: Task 5.
 - V2 dedupe and saved-short preference: Task 5.
 - HPSS, beats, bars/downbeats, phrase/section, energy, confidence: Task 2.
 - Baseline music lock and ±0.5 exception: Tasks 2, 7, 9, 10.
@@ -566,4 +575,5 @@ After each task, run its focused test file, inspect the diff, run git diff --che
 - [x] V2 render requires EDL, sync report, and timeline plot.
 - [x] V2 render has no path to complete Fast Montage or Full Highlights files.
 - [x] Every expensive V2 stage has source/parameter/version cache identity.
+- [x] Rapid multi-kill preference is an explicit capped, reportable score component rather than a hidden ranking change.
 - [x] The real-media task ends with A/B review, not full rendering.
