@@ -2,13 +2,17 @@ import json
 from pathlib import Path
 from dataclasses import replace
 
+import pytest
+
 from montage.config import load_config
 from montage.dedupe import (
     choose_v2_representative,
     deduplicate_variants,
+    fingerprint_variant,
     write_v2_dedupe_summary,
 )
-from montage.cache import v2_variant_fingerprint_cache_key
+from montage.cache import read_cached_json, v2_variant_fingerprint_cache_key
+from montage.candidate import write_v2_candidates
 from montage.models import CandidateVariant, PayoffEvent, SourceSegment
 from montage.ranking import rapid_multikill_score, score_variant
 
@@ -105,9 +109,12 @@ def test_rapid_multikill_bonus_is_capped_and_serialized_as_score_components():
     )
     scored = score_variant(replace(base, payoff_events=events), config)
 
-    assert rapid_multikill_score(events, config) == 1.0
+    assert rapid_multikill_score(events, config.rapid_multikill_window_s, config.rapid_multikill_min_events) == 1.0
     assert scored.score_components["rapid_multikill_score"] == 1.0
     assert scored.score_components["rapid_multikill_bonus"] == 0.12
+    payload = scored.to_dict()
+    assert payload["rapid_multikill_score"] == 1.0
+    assert payload["rapid_multikill_bonus"] == 0.12
     assert scored.final_score > base.final_score
 
 
@@ -117,7 +124,7 @@ def test_isolated_or_widely_separated_kills_receive_no_rapid_bonus():
         PayoffEvent("kill-1", "kill", 2.0, 0.9, 0.9, 0.9, {}),
         PayoffEvent("kill-2", "kill", 6.1, 0.9, 0.9, 0.9, {}),
     )
-    assert rapid_multikill_score(isolated, config) == 0.0
+    assert rapid_multikill_score(isolated, config.rapid_multikill_window_s, config.rapid_multikill_min_events) == 0.0
 
 
 def test_rapid_kill_sequence_outranks_equivalent_isolated_payoff():
@@ -136,3 +143,119 @@ def test_rapid_kill_sequence_outranks_equivalent_isolated_payoff():
     )
 
     assert score_variant(rapid, config).final_score > score_variant(isolated, config).final_score
+
+
+def test_rapid_multikill_score_has_the_approved_explicit_signature():
+    events = (
+        PayoffEvent("one", "kill", 1.0, 1.0, 1.0, 1.0, {}),
+        PayoffEvent("two", "kill", 4.0, 1.0, 1.0, 1.0, {}),
+    )
+
+    assert rapid_multikill_score(events, 4.0, 2) == 1.0
+
+
+def test_duplicate_event_ids_count_once_for_rapid_multikill():
+    events = (
+        PayoffEvent("same", "kill", 1.0, 1.0, 1.0, 1.0, {}),
+        PayoffEvent("same", "kill", 1.5, 1.0, 1.0, 1.0, {}),
+        PayoffEvent("other", "kill", 5.6, 1.0, 1.0, 1.0, {}),
+    )
+
+    assert rapid_multikill_score(events, 4.0, 2) == 0.0
+
+
+def test_score_audit_fields_are_written_to_json_and_csv(tmp_path):
+    config = load_config(Path(__file__).parents[1] / "config.yaml")
+    scored = score_variant(
+        replace(
+            variant("audit", "parent", 0.0, 8.0, payoff=0.8),
+            payoff_events=(
+                PayoffEvent("one", "kill", 1.0, 1.0, 1.0, 1.0, {}),
+                PayoffEvent("two", "kill", 4.0, 1.0, 1.0, 1.0, {}),
+            ),
+        ),
+        config,
+    )
+    json_path = tmp_path / "work" / "candidates.json"
+    csv_path = tmp_path / "work" / "candidates.csv"
+    write_v2_candidates([scored], json_path, csv_path, config=replace(config, work_dir=tmp_path / "work"))
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    csv_payload = csv_path.read_text(encoding="utf-8-sig")
+    assert payload["candidates"][0]["rapid_multikill_score"] == 1.0
+    assert payload["candidates"][0]["rapid_multikill_bonus"] == 0.12
+    assert "rapid_multikill_score" in csv_payload
+    assert "rapid_multikill_bonus" in csv_payload
+
+
+def _filesystem_variant(tmp_path):
+    source = tmp_path / "raw" / "clip.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    return replace(
+        variant("fingerprint", "parent", 0.0, 4.0),
+        source_file=source,
+        source_segments=(SourceSegment(source, 0.0, 4.0, 4.0),),
+    )
+
+
+def test_fingerprint_rejects_ffmpeg_failure_without_caching(tmp_path, base_config, fake_toolchain, monkeypatch):
+    item = _filesystem_variant(tmp_path)
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+
+    monkeypatch.setattr(
+        "montage.dedupe.subprocess.run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": b"", "stderr": b"failure"})(),
+    )
+    with pytest.raises(RuntimeError, match="FFmpeg fingerprinting failed"):
+        fingerprint_variant(item, item.source_file, fake_toolchain, config)
+    assert not list((config.cache_dir / "dedupe_v2").glob("*.json"))
+
+
+def test_fingerprint_rejects_truncated_ffmpeg_output_without_caching(tmp_path, base_config, fake_toolchain, monkeypatch):
+    item = _filesystem_variant(tmp_path)
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    monkeypatch.setattr(
+        "montage.dedupe.subprocess.run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": bytes(2 * 32 * 32), "stderr": b""})(),
+    )
+
+    with pytest.raises(RuntimeError, match="expected 3 frames"):
+        fingerprint_variant(item, item.source_file, fake_toolchain, config)
+    assert not list((config.cache_dir / "dedupe_v2").glob("*.json"))
+
+
+@pytest.mark.parametrize("payload", ["{not-json", {"cache_key": "wrong", "data": [1]}])
+def test_stale_or_corrupt_fingerprint_cache_is_rebuilt(tmp_path, base_config, fake_toolchain, monkeypatch, payload):
+    item = _filesystem_variant(tmp_path)
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    config.cache_dir.joinpath("dedupe_v2").mkdir(parents=True)
+    key = v2_variant_fingerprint_cache_key(
+        {"absolute_path": str(item.source_file.resolve()), "size": 6, "mtime": item.source_file.stat().st_mtime},
+        variant_id=item.variant_id, parent_candidate_id=item.parent_candidate_id, ranges=[(0.0, 4.0)],
+        interval=config.fingerprint_interval, detector_version=config.payoff_detector_version,
+        ffmpeg_version=fake_toolchain.ffmpeg_version, ffmpeg_path=str(fake_toolchain.ffmpeg.resolve(strict=False)),
+    )
+    cache_path = config.cache_dir / "dedupe_v2" / f"{key}.json"
+    cache_path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr("montage.dedupe._fingerprint_segment", lambda *args: [123, 456, 789])
+
+    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [123, 456, 789]
+    assert read_cached_json(cache_path, key) == [123, 456, 789]
+
+
+def test_fingerprint_enforces_raw_source_match_and_work_cache_boundary(tmp_path, base_config, fake_toolchain, monkeypatch):
+    item = _filesystem_variant(tmp_path)
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    other = tmp_path / "raw" / "other.mp4"
+    other.write_bytes(b"other")
+
+    with pytest.raises(ValueError, match="match variant.source_file"):
+        fingerprint_variant(item, other, fake_toolchain, config)
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"outside")
+    with pytest.raises(ValueError, match="below raw"):
+        fingerprint_variant(item, outside, fake_toolchain, config)
+    monkeypatch.setattr(type(config), "cache_dir", property(lambda self: tmp_path / "cache"))
+    with pytest.raises(ValueError, match="below work_dir"):
+        fingerprint_variant(item, item.source_file, fake_toolchain, config)

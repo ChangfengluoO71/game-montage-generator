@@ -77,14 +77,14 @@ def calculate_penalties(
     }
 
 
-def rapid_multikill_score(events: Sequence[PayoffEvent], config: PipelineConfig) -> float:
+def rapid_multikill_score(events: Sequence[PayoffEvent], window_s: float, minimum_events: int) -> float:
     """Return the capped payoff score for distinct rapid kill/multikill events."""
     qualifying = sorted(
         {event.event_id: event for event in events if event.type in {"kill", "multikill"}}.values(),
         key=lambda event: event.source_time,
     )
-    minimum = max(2, int(config.rapid_multikill_min_events))
-    window = float(config.rapid_multikill_window_s)
+    minimum = max(2, int(minimum_events))
+    window = float(window_s)
     if window <= 0 or len(qualifying) < minimum:
         return 0.0
     best_count = 0
@@ -110,7 +110,9 @@ def score_variant(variant: CandidateVariant, config: PipelineConfig) -> Candidat
     }
     weighted = {name: round(_clamp(value) * float(config.v2_weights.get(name, 0.0)), 6) for name, value in values.items()}
     penalties = {name: _clamp(value) for name, value in variant.penalty_values.items()}
-    rapid_score = rapid_multikill_score(variant.payoff_events, config)
+    rapid_score = rapid_multikill_score(
+        variant.payoff_events, config.rapid_multikill_window_s, config.rapid_multikill_min_events
+    )
     configured_bonus = max(0.0, min(RAPID_MULTIKILL_MAX_BONUS, float(config.rapid_multikill_bonus_weight)))
     rapid_bonus = round(min(configured_bonus, rapid_score * configured_bonus), 6)
     components = {**weighted, **penalties, "rapid_multikill_score": rapid_score, "rapid_multikill_bonus": rapid_bonus}

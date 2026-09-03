@@ -10,7 +10,7 @@ from typing import Literal, Mapping, Sequence
 import numpy as np
 
 from .cache import file_fingerprint, read_cached_json, v2_variant_fingerprint_cache_key, write_cached_json
-from .config import PipelineConfig
+from .config import PipelineConfig, assert_source_read_only, is_within
 from .models import Candidate, CandidateVariant, DedupeResult, V2DedupeResult
 from .toolchain import Toolchain
 
@@ -74,8 +74,15 @@ def _fingerprint_segment(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    if result.returncode != 0:
+        details = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"FFmpeg fingerprinting failed: {details or 'unknown error'}")
     data = result.stdout or b""
     frame_size = 32 * 32
+    expected_bytes = sample_count * frame_size
+    if len(data) != expected_bytes:
+        actual_frames = len(data) / frame_size
+        raise RuntimeError(f"FFmpeg fingerprint output expected {sample_count} frames, got {actual_frames:g}")
     return [_dhash(np.frombuffer(data[offset : offset + frame_size], dtype=np.uint8)) for offset in range(0, len(data) - frame_size + 1, frame_size)]
 
 
@@ -83,6 +90,9 @@ def fingerprint_variant(
     variant: CandidateVariant, source_for_analysis: Path, toolchain: Toolchain, config: PipelineConfig
 ) -> list[int]:
     """Fingerprint every authoritative source segment, caching against the selected FFmpeg identity."""
+    assert_source_read_only(source_for_analysis, config.raw_dir)
+    if source_for_analysis.resolve(strict=True) != variant.source_file.resolve(strict=True):
+        raise ValueError("fingerprint analysis source must match variant.source_file")
     interval = config.fingerprint_interval
     if interval <= 0:
         raise ValueError("fingerprint_interval must be positive")
@@ -97,7 +107,10 @@ def fingerprint_variant(
         ffmpeg_version=toolchain.ffmpeg_version,
         ffmpeg_path=str(toolchain.ffmpeg.resolve(strict=False)),
     )
-    cache_path = config.cache_dir / "dedupe_v2" / f"{key}.json"
+    cache_root = config.cache_dir.resolve(strict=False)
+    if not is_within(cache_root, config.work_dir) or is_within(cache_root, config.raw_dir):
+        raise ValueError(f"V2 fingerprint cache must remain below work_dir: {cache_root}")
+    cache_path = cache_root / "dedupe_v2" / f"{key}.json"
     cached = read_cached_json(cache_path, key)
     if isinstance(cached, list) and all(isinstance(value, int) for value in cached):
         return list(cached)
