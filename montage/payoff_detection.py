@@ -143,6 +143,8 @@ def fuse_evidence(sample: EvidenceSample, config: PipelineConfig) -> PayoffEvent
     if not evidence:
         return None
     confidence = _diminishing_fusion(_family_scores(evidence))
+    if confidence < config.payoff_evidence_threshold:
+        return None
     event_type, semantic_confidence = classify_semantics(evidence, config)
     strength = _clamp((0.70 * confidence) + (0.30 * max(evidence.values())))
     flags = tuple(sorted(channel for channel, value in evidence.items() if value >= config.payoff_evidence_threshold))
@@ -158,13 +160,19 @@ def fuse_evidence(sample: EvidenceSample, config: PipelineConfig) -> PayoffEvent
     )
 
 
-def merge_event_peaks(events: Sequence[PayoffEvent], window_ms: int) -> list[PayoffEvent]:
+def merge_event_peaks(
+    events: Sequence[PayoffEvent],
+    window_ms: int,
+    config: PipelineConfig | None = None,
+) -> list[PayoffEvent]:
     if window_ms < 0:
         raise ValueError("event merge window must not be negative")
     window = window_ms / 1000.0
     groups: list[list[PayoffEvent]] = []
     for event in sorted(events, key=lambda item: item.source_time):
-        if groups and event.source_time - groups[-1][-1].source_time <= window + 1e-9:
+        # Bound each refractory group by its first peak. Comparing with the last
+        # event would make a 6fps noisy run merge transitively without limit.
+        if groups and event.source_time - groups[-1][0].source_time <= window + 1e-9:
             groups[-1].append(event)
         else:
             groups.append([event])
@@ -179,9 +187,13 @@ def merge_event_peaks(events: Sequence[PayoffEvent], window_ms: int) -> list[Pay
             for flag in event.detector_flags:
                 if flag not in flags:
                     flags.append(flag)
-        event_type, semantic_confidence = classify_semantics(evidence, _MergeConfig())
-        if event_type not in SEMANTIC_TYPES:
+        if config is None:
             event_type = max(group, key=lambda item: SEMANTIC_RANK.get(item.type, -1)).type
+            semantic_confidence = max(event.semantic_confidence for event in group)
+        else:
+            event_type, semantic_confidence = classify_semantics(evidence, config)
+            if event_type not in SEMANTIC_TYPES:
+                event_type = max(group, key=lambda item: SEMANTIC_RANK.get(item.type, -1)).type
         merged.append(PayoffEvent(
             event_id=peak.event_id,
             type=event_type,
@@ -194,12 +206,6 @@ def merge_event_peaks(events: Sequence[PayoffEvent], window_ms: int) -> list[Pay
             merged_peak_count=sum(event.merged_peak_count for event in group),
         ))
     return merged
-
-
-class _MergeConfig:
-    """The merge classifier needs only the stable safety thresholds."""
-    payoff_evidence_threshold = 0.35
-    weak_anchor_threshold = 0.55
 
 
 def _roi(frame: np.ndarray, bounds: Sequence[float]) -> np.ndarray:
@@ -307,48 +313,31 @@ def _event_from_payload(payload: Mapping[str, object]) -> PayoffEvent:
     )
 
 
-def detect_payoff_events(
-    source: Path,
+def _select_local_peaks(events: Sequence[PayoffEvent], config: PipelineConfig) -> list[PayoffEvent]:
+    """Keep qualified local confidence maxima, including one-sided weak-event peaks."""
+    ordered = sorted(events, key=lambda item: item.source_time)
+    peaks: list[PayoffEvent] = []
+    for index, event in enumerate(ordered):
+        if event.confidence < config.payoff_evidence_threshold:
+            continue
+        previous = ordered[index - 1].confidence if index else float("-inf")
+        following = ordered[index + 1].confidence if index + 1 < len(ordered) else float("-inf")
+        if event.confidence >= previous and event.confidence > following:
+            peaks.append(event)
+    return peaks
+
+
+def _events_from_frames(
+    frames: Sequence[np.ndarray],
     source_start: float,
     source_end: float,
     analysis: VideoAnalysis,
     audio: Mapping[str, Sequence[float]],
     config: PipelineConfig,
-    toolchain: Toolchain,
 ) -> list[PayoffEvent]:
-    """Detect events in a source-time range, caching raw and refractory-merged evidence below work."""
-    assert_source_read_only(source, config.raw_dir)
-    if source_end < source_start:
-        raise ValueError("source_end must not precede source_start")
-    if not is_within(config.cache_dir, config.work_dir):
-        raise ValueError("payoff detector cache must remain below work")
-    parameters: dict[str, object] = {
-        "stage_version": config.payoff_detector_version,
-        "ffmpeg_version": toolchain.ffmpeg_version,
-        "payoff_analysis_fps": config.payoff_analysis_fps,
-        "roi_profile_version": config.roi_profile.get("version", 1),
-        "payoff_evidence_threshold": config.payoff_evidence_threshold,
-        "weak_anchor_threshold": config.weak_anchor_threshold,
-        "strong_anchor_threshold": config.strong_anchor_threshold,
-        "event_merge_window_ms": config.event_merge_window_ms,
-        "source_start": source_start,
-        "source_end": source_end,
-    }
-    key = v2_cache_key(file_fingerprint(source), "payoff_events", parameters)
-    cache_path = config.cache_dir / f"payoff_events_{key}.json"
-    cached = read_cached_json(cache_path, key)
-    if isinstance(cached, dict) and isinstance(cached.get("merged_events"), list):
-        return [_event_from_payload(item) for item in cached["merged_events"]]
-
-    duration = max(0.0, source_end - source_start)
-    if duration > config.long_clip_threshold:
-        proxy = _build_long_window_proxy(source, source_start, source_end, config, toolchain)
-        coarse_frames = _decode_color_frames(proxy, config.payoff_analysis_fps, toolchain, 0.0, duration)
-        frames = _decode_color_frames(source, config.payoff_analysis_fps, toolchain, source_start, source_end) if coarse_frames else []
-    else:
-        frames = _decode_color_frames(source, config.payoff_analysis_fps, toolchain, source_start, source_end)
     raw_events: list[PayoffEvent] = []
     previous: np.ndarray | None = None
+    duration = max(0.0, source_end - source_start)
     for index, frame in enumerate(frames):
         local_time = min(duration, index / max(config.payoff_analysis_fps, 1e-6))
         frame = np.asarray(frame, dtype=np.uint8)
@@ -376,7 +365,75 @@ def detect_payoff_events(
         if event is not None:
             raw_events.append(event)
         previous = frame
-    merged_events = merge_event_peaks(raw_events, config.event_merge_window_ms)
+    return _select_local_peaks(raw_events, config)
+
+
+def _refinement_windows(
+    coarse_events: Sequence[PayoffEvent],
+    source_start: float,
+    source_end: float,
+    config: PipelineConfig,
+) -> list[tuple[float, float]]:
+    radius = min(2.0, max(0.5, config.event_merge_window_ms / 1000.0))
+    windows = sorted((max(source_start, event.source_time - radius), min(source_end, event.source_time + radius)) for event in coarse_events)
+    merged: list[tuple[float, float]] = []
+    for start, end in windows:
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def detect_payoff_events(
+    source: Path,
+    source_start: float,
+    source_end: float,
+    analysis: VideoAnalysis,
+    audio: Mapping[str, Sequence[float]],
+    config: PipelineConfig,
+    toolchain: Toolchain,
+) -> list[PayoffEvent]:
+    """Detect events in a source-time range, caching raw and refractory-merged evidence below work."""
+    assert_source_read_only(source, config.raw_dir)
+    if source_end < source_start:
+        raise ValueError("source_end must not precede source_start")
+    if not is_within(config.cache_dir, config.work_dir):
+        raise ValueError("payoff detector cache must remain below work")
+    parameters: dict[str, object] = {
+        "stage_version": config.payoff_detector_version,
+        "ffmpeg_version": toolchain.ffmpeg_version,
+        "payoff_analysis_fps": config.payoff_analysis_fps,
+        "roi_profile_version": config.roi_profile.get("version", 1),
+        "payoff_evidence_threshold": config.payoff_evidence_threshold,
+        "weak_anchor_threshold": config.weak_anchor_threshold,
+        "strong_anchor_threshold": config.strong_anchor_threshold,
+        "event_merge_window_ms": config.event_merge_window_ms,
+        "long_clip_threshold": config.long_clip_threshold,
+        "source_start": source_start,
+        "source_end": source_end,
+    }
+    key = v2_cache_key(file_fingerprint(source), "payoff_events", parameters)
+    cache_path = config.cache_dir / f"payoff_events_{key}.json"
+    cached = read_cached_json(cache_path, key)
+    if isinstance(cached, dict) and isinstance(cached.get("merged_events"), list):
+        return [_event_from_payload(item) for item in cached["merged_events"]]
+
+    duration = max(0.0, source_end - source_start)
+    if duration > config.long_clip_threshold:
+        proxy = _build_long_window_proxy(source, source_start, source_end, config, toolchain)
+        coarse_frames = _decode_color_frames(proxy, config.payoff_analysis_fps, toolchain, 0.0, duration)
+        coarse_events = _events_from_frames(coarse_frames, source_start, source_end, analysis, audio, config)
+        raw_events: list[PayoffEvent] = []
+        for refine_start, refine_end in _refinement_windows(coarse_events, source_start, source_end, config):
+            refined_frames = _decode_color_frames(source, config.payoff_analysis_fps, toolchain, refine_start, refine_end)
+            raw_events.extend(_events_from_frames(refined_frames, refine_start, refine_end, analysis, audio, config))
+    else:
+        frames = _decode_color_frames(source, config.payoff_analysis_fps, toolchain, source_start, source_end)
+        raw_events = _events_from_frames(frames, source_start, source_end, analysis, audio, config)
+    merged_events = merge_event_peaks(raw_events, config.event_merge_window_ms, config)
     histogram, edges = np.histogram([event.confidence for event in merged_events], bins=[0.0, 0.25, 0.5, 0.75, 1.000001])
     write_cached_json(cache_path, key, {
         "detector_version": config.payoff_detector_version,
@@ -393,8 +450,10 @@ def detect_payoff_events(
     return merged_events
 
 
-def write_payoff_events(events: Sequence[PayoffEvent], path: Path) -> None:
+def write_payoff_events(events: Sequence[PayoffEvent], path: Path, config: PipelineConfig) -> None:
     if path.suffix.lower() != ".json":
         raise ValueError("payoff events must be written as JSON")
+    if not is_within(path, config.work_dir):
+        raise ValueError(f"payoff event destination must remain below work: {path}")
     from .cache import atomic_write_json
     atomic_write_json(path, {"events": [event.to_dict() for event in events], "event_count": len(events)})
