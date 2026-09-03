@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import json
+import math
 import uuid
 from pathlib import Path
 from typing import Sequence
 
 from .audio_mix import build_v2_audio_filter
-from .cache import atomic_write_bytes
 from .config import PipelineConfig, assert_source_read_only, is_within
 from .models import SourceSegment, V2EditDecisionList, V2EditShot
 from .toolchain import Toolchain, run_command
@@ -23,9 +24,76 @@ def _encoder(toolchain: Toolchain, config: PipelineConfig) -> tuple[str, list[st
     return str(config.nvenc.get("fallback_encoder", "libx264")), ["-preset", "medium", "-crf", "18"]
 
 
-def _reject_raw(destination: Path, config: PipelineConfig) -> None:
-    if is_within(destination, config.raw_dir):
+def _strictly_within(path: Path, root: Path) -> bool:
+    resolved_path = path.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    return resolved_path != resolved_root and is_within(resolved_path, resolved_root)
+
+
+def _validate_destination(destination: Path, config: PipelineConfig, *, final: bool) -> None:
+    resolved = destination.resolve(strict=False)
+    raw = config.raw_dir.resolve(strict=False)
+    baseline = config.baseline_output_path.resolve(strict=False)
+    output_dir = config.output_dir.resolve(strict=False)
+
+    if resolved == raw or is_within(resolved, raw):
         raise ValueError(f"Render destination cannot be inside raw: {destination}")
+    if resolved == baseline:
+        raise ValueError(f"Render destination cannot replace the immutable baseline: {destination}")
+    if resolved == output_dir:
+        raise ValueError(f"Render destination cannot be the output directory: {destination}")
+
+    if _strictly_within(resolved, config.work_dir):
+        return
+    if final and resolved == config.v2_output_path.resolve(strict=False):
+        return
+    scope = "work_dir or the configured V2 output" if final else "work_dir"
+    raise ValueError(f"Render destination must be below {scope}: {destination}")
+
+
+def _probe_source_duration(source: Path, toolchain: Toolchain) -> float:
+    result = run_command(
+        [
+            toolchain.ffprobe, "-hide_banner", "-loglevel", "error",
+            "-show_entries", "stream=codec_type:format=duration",
+            "-of", "json", str(source),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"ffprobe failed for V2 source: {source}")
+    try:
+        payload = json.loads(result.stdout or "")
+        streams = payload.get("streams") or []
+        duration = float((payload.get("format") or {}).get("duration"))
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"V2 source probe has invalid duration: {source}") from exc
+    stream_types = {stream.get("codec_type") for stream in streams if isinstance(stream, dict)}
+    if not {"video", "audio"} <= stream_types:
+        raise ValueError(f"V2 source must contain video and audio streams: {source}")
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"V2 source probe has invalid duration: {source}")
+    return duration
+
+
+def _preflight_v2_sources(edit: V2EditDecisionList, config: PipelineConfig, toolchain: Toolchain) -> None:
+    requested_out: dict[Path, float] = {}
+    for shot in edit.shots:
+        requested_out[shot.source.resolve(strict=False)] = max(
+            requested_out.get(shot.source.resolve(strict=False), 0.0), shot.source_out
+        )
+        for segment in shot.source_segments:
+            key = segment.source.resolve(strict=False)
+            requested_out[key] = max(requested_out.get(key, 0.0), segment.source_out)
+
+    for source, source_out in requested_out.items():
+        assert_source_read_only(source, config.raw_dir)
+        actual_duration = _probe_source_duration(source, toolchain)
+        if source_out > actual_duration + 0.02:
+            raise ValueError(
+                f"V2 source range exceeds probed duration for {source}: "
+                f"source_out={source_out:.3f}, duration={actual_duration:.3f}"
+            )
 
 
 def compile_v2_segment_argv(
@@ -38,7 +106,7 @@ def compile_v2_segment_argv(
         raise ValueError("invalid V2 source segment range")
     if abs(segment.duration - (segment.source_out - segment.source_in)) > 0.001:
         raise ValueError("V2 source segment duration does not match its range")
-    _reject_raw(destination, config)
+    _validate_destination(destination, config, final=False)
     encoder, encoder_args = _encoder(toolchain, config)
     graph = (
         "[0:v:0]setpts=PTS-STARTPTS,"
@@ -121,7 +189,7 @@ def compile_v2_final_argv(
     if len(segment_paths) != len(edit.shots) and len(edit.shots) > 1:
         # Flattened condensed source segments are valid; overlap metadata is then conservatively skipped.
         pass
-    _reject_raw(destination, config)
+    _validate_destination(destination, config, final=True)
     count = len(segment_paths)
     video_inputs = "".join(f"[{index}:v:0]" for index in range(count))
     graph = f"{video_inputs}concat=n={count}:v=1:a=0[v];"
@@ -149,13 +217,14 @@ def render_v2_edit(
 ) -> Path:
     from .beam_timeline import validate_v2_edit
 
-    _reject_raw(output_path, config)
+    _validate_destination(output_path, config, final=True)
     expected = config.v2_output_path.resolve(strict=False)
     if output_path.resolve(strict=False) != expected:
         raise ValueError("V2 renderer may replace only the configured V2 output")
     validate_v2_edit(edit, config)
     if not edit.music_source.is_file():
         raise FileNotFoundError(edit.music_source)
+    _preflight_v2_sources(edit, config, toolchain)
     run_dir = config.render_v2_dir / uuid.uuid4().hex
     run_dir.mkdir(parents=True, exist_ok=False)
     segment_paths: list[Path] = []

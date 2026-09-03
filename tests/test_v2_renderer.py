@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -39,7 +40,7 @@ def _edit(source: Path, music: Path) -> V2EditDecisionList:
 
 def test_segment_argv_fits_without_upscale_and_keeps_source_cadence(fake_toolchain, base_config, tmp_path):
     source = tmp_path / "clip.mp4"
-    destination = tmp_path / "work" / "segment.mp4"
+    destination = base_config.work_dir / "segment.mp4"
     argv = compile_v2_segment_argv(SourceSegment(source, 2.0, 7.0, 5.0), base_config, fake_toolchain, destination)
 
     graph = argv[argv.index("-filter_complex") + 1]
@@ -55,7 +56,7 @@ def test_final_argv_has_hard_cut_video_and_single_music_input(fake_toolchain, ba
     music = tmp_path / "music.flac"
     segment_paths = [tmp_path / f"segment-{i}.mp4" for i in range(2)]
     edit = replace(_edit(source, music), shots=(_shot(source, 0), _shot(source, 1)))
-    argv = compile_v2_final_argv(segment_paths, edit, base_config, fake_toolchain, tmp_path / "out.mp4")
+    argv = compile_v2_final_argv(segment_paths, edit, base_config, fake_toolchain, base_config.work_dir / "out.mp4")
     graph = argv[argv.index("-filter_complex") + 1]
 
     assert graph.count("concat=n=2") == 1
@@ -97,7 +98,86 @@ def test_renderer_rejects_raw_destination_before_running_ffmpeg(fake_toolchain, 
         render_v2_edit(edit, base_config, fake_toolchain, raw_destination)
 
 
+@pytest.mark.parametrize("destination", [
+    "baseline",
+    "output_dir",
+    "external",
+])
+def test_segment_argv_rejects_destinations_outside_work_policy(fake_toolchain, base_config, tmp_path, destination):
+    source = tmp_path / "clip.mp4"
+    destinations = {
+        "baseline": base_config.baseline_output_path,
+        "output_dir": base_config.output_dir,
+        "external": tmp_path / "outside" / "segment.mp4",
+    }
+    with pytest.raises(ValueError):
+        compile_v2_segment_argv(
+            SourceSegment(source, 0.0, 1.0, 1.0), base_config, fake_toolchain, destinations[destination]
+        )
+
+
+@pytest.mark.parametrize("destination", [
+    "baseline",
+    "output_dir",
+    "external",
+])
+def test_final_argv_rejects_destinations_except_work_intermediate(fake_toolchain, base_config, tmp_path, destination):
+    source = tmp_path / "clip.mp4"
+    music = tmp_path / "music.flac"
+    edit = _edit(source, music)
+    segment = base_config.work_dir / "segment.mp4"
+    destinations = {
+        "baseline": base_config.baseline_output_path,
+        "output_dir": base_config.output_dir,
+        "external": tmp_path / "outside" / "final.mp4",
+    }
+    with pytest.raises(ValueError):
+        compile_v2_final_argv([segment], edit, base_config, fake_toolchain, destinations[destination])
+
+
+def test_renderer_preflights_all_sources_with_selected_ffprobe_before_rendering(
+    fake_toolchain, base_config, tmp_path, monkeypatch
+):
+    test_config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        output_dir=tmp_path / "output",
+    )
+    source = test_config.raw_dir / "task8-preflight-a.mp4"
+    second_source = test_config.raw_dir / "task8-preflight-b.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"fixture")
+    second_source.write_bytes(b"fixture")
+    music = tmp_path / "music.flac"
+    music.write_bytes(b"fixture")
+    edit = _edit(source, music)
+    shots = list(edit.shots)
+    shots[-1] = _shot(second_source, 8)
+    edit = replace(edit, shots=tuple(shots))
+    commands = []
+
+    def fake_run(argv, **kwargs):
+        commands.append([str(value) for value in argv])
+        if str(argv[0]) == str(fake_toolchain.ffprobe):
+            if str(source) in [str(value) for value in argv]:
+                stdout = '{"streams":[{"codec_type":"video"},{"codec_type":"audio"}],"format":{"duration":"100.0"}}'
+            else:
+                stdout = '{"streams":[{"codec_type":"video"}],"format":{"duration":"100.0"}}'
+            return CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        raise AssertionError("render command must not run after failed preflight")
+
+    monkeypatch.setattr("montage.v2_renderer.run_command", fake_run)
+    with pytest.raises(ValueError, match="video and audio"):
+        render_v2_edit(edit, test_config, fake_toolchain, test_config.v2_output_path)
+    assert len(commands) == 2
+    assert commands[0][0] == str(fake_toolchain.ffprobe)
+    assert commands[1][0] == str(fake_toolchain.ffprobe)
+
+
 def test_cpu_toolchain_uses_safe_h264_fallback(fake_toolchain, base_config, tmp_path):
     cpu = replace(fake_toolchain, nvenc_h264=False)
-    argv = compile_v2_segment_argv(SourceSegment(tmp_path / "clip.mp4", 0.0, 1.0, 1.0), base_config, cpu, tmp_path / "out.mp4")
+    argv = compile_v2_segment_argv(
+        SourceSegment(tmp_path / "clip.mp4", 0.0, 1.0, 1.0), base_config, cpu, base_config.work_dir / "out.mp4"
+    )
     assert argv[argv.index("-c:v") + 1] == "libx264"
