@@ -2,6 +2,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 import main
 from montage.models import (
     Candidate,
@@ -15,7 +17,7 @@ from montage.models import (
     V2EditShot,
 )
 from montage.timeline_visualization import render_v2_timeline_plot
-from montage.v2_report import build_v2_sync_report
+from montage.v2_report import build_v2_sync_report, render_v2_markdown_report
 
 
 def _event(event_id: str, event_type: str, source_time: float, confidence: float = 0.9) -> PayoffEvent:
@@ -98,6 +100,9 @@ def test_report_contains_baseline_and_event_metrics(tmp_path):
     report = build_v2_sync_report(_v2_edit(tmp_path), _baseline(), [], {"stationary_ads": 2})
     assert report["baseline_music_range"] == [19.0, 74.252]
     assert report["v2_music_range"] == [19.0, 74.252]
+    assert report["music_in"] == 19.0
+    assert report["music_out"] == 74.252
+    assert report["music_reason"] == "baseline locked"
     assert "event_sync_P95" in report
     assert "cut_sync_P95" in report
     assert "transition_compatibility_mean" in report
@@ -112,6 +117,14 @@ def test_report_contains_baseline_and_event_metrics(tmp_path):
     assert report["comparisons"]["rejected_by_stationary_ads"]["v1"] is None
     assert report["comparisons"]["rejected_by_stationary_ads"]["v1_available"] is False
     assert report["comparisons"]["rejected_by_stationary_ads"]["v1_reason"]
+
+    markdown_path = tmp_path / "preview_v2_report.md"
+    render_v2_markdown_report(report, markdown_path)
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "## Music interval" in markdown
+    assert "- music_in: 19.000s" in markdown
+    assert "- music_out: 74.252s" in markdown
+    assert "- reason: baseline locked" in markdown
 
 
 def test_report_distinguishes_unavailable_v1_penalties_from_zero(tmp_path):
@@ -258,3 +271,30 @@ def test_cached_audio_helper_returns_per_source_evidence(tmp_path, monkeypatch, 
     monkeypatch.setattr(main, "analyze_audio_waveform", lambda *args: {"times": [0.0], "onset_strength": [0.9]})
     evidence = main._cached_audio_evidence(config, candidate, [], fake_toolchain)
     assert evidence["onset_strength"] == [0.9]
+
+
+def test_v2_pipeline_logs_selected_toolchain_details_before_processing(tmp_path, monkeypatch, fake_toolchain):
+    config = replace(
+        main.load_config(Path(__file__).parents[1] / "config.yaml"),
+        raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", output_dir=tmp_path / "output",
+    )
+
+    class RecordingLogger:
+        def __init__(self):
+            self.messages = []
+
+        def info(self, message, *args):
+            self.messages.append(message % args if args else message)
+
+    logger = RecordingLogger()
+    monkeypatch.setattr(main, "_logger", lambda _: logger)
+    monkeypatch.setattr(main, "discover_toolchain", lambda _: fake_toolchain)
+    monkeypatch.setattr(main, "write_environment_report", lambda *args: None)
+
+    with pytest.raises(FileNotFoundError, match="immutable V1 baseline"):
+        main.run_v2_analysis_pipeline(config)
+
+    joined = "\n".join(logger.messages)
+    assert f"V2 FFmpeg selected path={fake_toolchain.ffmpeg.resolve(strict=False)} version=8.0" in joined
+    assert f"V2 ffprobe selected path={fake_toolchain.ffprobe.resolve(strict=False)} version=8.0" in joined
+    assert "V2 NVENC runtime h264_nvenc=True hevc_nvenc=True" in joined

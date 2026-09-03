@@ -133,6 +133,38 @@ def write_environment_report(toolchain: Toolchain, config: PipelineConfig, path:
     atomic_write_json(path, payload)
 
 
+def _format_v2_time(seconds: float) -> str:
+    """Format a timeline/source timestamp as stable ``mm:ss.mmm`` text."""
+    value = float(seconds)
+    sign = "-" if value < 0 else ""
+    milliseconds = int(round(abs(value) * 1000.0))
+    minutes, remainder = divmod(milliseconds, 60_000)
+    seconds_part, milliseconds_part = divmod(remainder, 1000)
+    return f"{sign}{minutes:02d}:{seconds_part:02d}.{milliseconds_part:03d}"
+
+
+def _format_v2_offset(seconds: float) -> str:
+    """Format a sync offset as a signed, human-readable millisecond value."""
+    return f"{int(round(float(seconds) * 1000.0)):+d}ms"
+
+
+def _log_v2_toolchain(logger: logging.Logger, toolchain: Toolchain) -> None:
+    """Record the exact toolchain used by the V2 analysis run."""
+    logger.info(
+        "V2 FFmpeg selected path=%s version=%s",
+        toolchain.ffmpeg.resolve(strict=False), toolchain.ffmpeg_version,
+    )
+    logger.info(
+        "V2 ffprobe selected path=%s version=%s",
+        toolchain.ffprobe.resolve(strict=False), toolchain.ffprobe_version,
+    )
+    logger.info(
+        "V2 NVENC runtime h264_nvenc=%s hevc_nvenc=%s",
+        toolchain.nvenc_h264, toolchain.nvenc_hevc,
+    )
+    logger.info("V2 toolchain selection reason=%s", toolchain.selected_reason)
+
+
 def _record_from_dict(data: dict[str, Any]) -> MediaRecord:
     return MediaRecord(
         file_path=Path(data["file_path"]),
@@ -458,9 +490,23 @@ def _cached_audio_evidence(config: PipelineConfig, candidate: Candidate, records
 def _write_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
     atomic_write_json(config.preview_v2_edit_path, edit.to_dict())
     config.preview_v2_timeline_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{i + 1:02d} {shot.timeline_in:.3f}-{shot.timeline_out:.3f} {shot.source} "
-             f"anchor={shot.anchor_event_type or 'none'} event_offset={shot.event_sync_offset:.3f}"
-             for i, shot in enumerate(edit.shots)]
+    lines: list[str] = []
+    for i, shot in enumerate(edit.shots):
+        music_target = "none" if shot.music_target is None else _format_v2_time(shot.music_target)
+        rationale = shot.rationale.strip() or "No placement rationale recorded."
+        lines.extend([
+            f"Shot {i + 1:02d}",
+            f"Timeline: {_format_v2_time(shot.timeline_in)} - {_format_v2_time(shot.timeline_out)}",
+            f"Source: {shot.source}",
+            f"Source range: {_format_v2_time(shot.source_in)} - {_format_v2_time(shot.source_out)}",
+            f"Score: {shot.candidate_score:.3f}",
+            f"Duplicate group: {shot.duplicate_group or 'none'}",
+            f"Music: target {music_target}; event {shot.music_event_type or 'none'}",
+            f"Sync: event {_format_v2_offset(shot.event_sync_offset)}; cut {_format_v2_offset(shot.cut_sync_offset)}",
+            f"Transition: {shot.transition}",
+            f"Reason: {rationale}",
+            "",
+        ])
     config.preview_v2_timeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -472,6 +518,7 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     atomic_write_json(config.analysis_dir / "raw_manifest_v2_before.json", raw_before)
     toolchain = discover_toolchain(config)
     write_environment_report(toolchain, config, config.environment_v2_path)
+    _log_v2_toolchain(logger, toolchain)
     logger.info("V2 thresholds strong=%.3f weak=%.3f merge=%dms beam_width=%d", config.strong_anchor_threshold,
                 config.weak_anchor_threshold, config.event_merge_window_ms, config.beam_width)
     logger.info("V2 OCR available=%s encoder=%s output=%s stop_rule=preview-only", ocr_available(),

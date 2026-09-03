@@ -125,6 +125,9 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
         "diagnostic_evidence": True,
         "baseline_music_range": [float(baseline.music_in), float(baseline.music_out)],
         "v2_music_range": [float(edit.music_in), float(edit.music_out)],
+        "music_in": float(edit.music_in),
+        "music_out": float(edit.music_out),
+        "music_reason": str(edit.music_reason),
         **v2,
         **rejected_metrics,
         "comparisons": comparisons,
@@ -153,6 +156,17 @@ def write_v2_report(report: dict[str, object], path: Path) -> None:
 def render_v2_markdown_report(report: dict[str, object], path: Path, *, toolchain: Any = None,
                               output: Path | None = None) -> None:
     lines = ["# Battlefield Montage V2 Preview Report", "", "Diagnostic evidence for V1/V2 A/B review.", ""]
+    music_in = report.get("music_in")
+    music_out = report.get("music_out")
+    lines.extend([
+        "## Music interval",
+        f"- music_in: {float(music_in):.3f}s" if isinstance(music_in, (int, float)) else f"- music_in: {json.dumps(music_in, ensure_ascii=False)}",
+        f"- music_out: {float(music_out):.3f}s" if isinstance(music_out, (int, float)) else f"- music_out: {json.dumps(music_out, ensure_ascii=False)}",
+        f"- reason: {report.get('music_reason', '')}",
+        f"- baseline_music_range: {json.dumps(report.get('baseline_music_range'), ensure_ascii=False)}",
+        f"- v2_music_range: {json.dumps(report.get('v2_music_range'), ensure_ascii=False)}",
+        "",
+    ])
     for key, value in report.items():
         if key == "caveats":
             continue

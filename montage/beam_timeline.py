@@ -121,6 +121,14 @@ def _make_shot(
         variant if not state.shots else _variant_for_shot(state.shots[-1]), variant, config
     )
     cut_offset = float(music_target - hint)
+    section = _section(timeline_in, total_duration)
+    base_rationale = variant.rationale.strip() or "setup action payoff tail"
+    anchor_label = event_type or "none"
+    rationale = (
+        f"{base_rationale}; placement section={section}; anchor={anchor_label}; "
+        f"music_target={music_target:.3f}s; event_sync={event_offset:+.3f}s; "
+        f"cut_sync={cut_offset:+.3f}s"
+    )
     return V2EditShot(
         source=variant.source_file,
         source_in=variant.source_segments[0].source_in,
@@ -134,8 +142,8 @@ def _make_shot(
         music_target=music_target,
         music_event_type=event_type,
         sync_offset=cut_offset,
-        rationale=variant.rationale or "setup action payoff tail",
-        section=_section(timeline_in, total_duration),
+        rationale=rationale,
+        section=section,
         source_duration=variant.duration,
         source_segments=variant.source_segments,
         parent_candidate_id=variant.parent_candidate_id,

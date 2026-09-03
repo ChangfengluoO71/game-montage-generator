@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import main
 from montage.models import BoundaryDescriptor, CandidateVariant, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
 from montage.models import EditDecisionList, V2EditDecisionList
 import montage.beam_timeline as beam_timeline
@@ -230,6 +231,54 @@ def test_v2_beam_builds_bounded_payoff_aware_edit(tmp_path, base_config):
     assert edit.shots[-1].anchor_event_type == "kill"
     assert (config.preview_v2_edit_path).exists()
     assert (config.preview_v2_timeline_path).exists()
+
+
+def test_v2_shot_rationale_records_placement_context(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    candidate = timeline_variant(tmp_path, 1)
+
+    shot = beam_timeline._make_shot(candidate, BeamState(), music(), config, 55.0, baseline_music_in=19.0)
+
+    assert "section=build" in shot.rationale
+    assert "anchor=kill" in shot.rationale
+    assert "music_target=" in shot.rationale
+
+
+def test_v2_timeline_is_auditable_shot_block(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    source = config.raw_dir / "clip.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.touch()
+    event_payload = event("timeline-payoff", "kill", 3.0)
+    segment = SourceSegment(source, 14.3, 19.7, 5.4)
+    shot = beam_timeline.V2EditShot(
+        source=source, source_in=14.3, source_out=19.7, duration=5.4, candidate_score=0.82,
+        duplicate_group="group-1", timeline_in=0.0, timeline_out=5.4, transition="hard_cut",
+        music_target=20.0, music_event_type="strong_beat", sync_offset=0.041,
+        rationale="medium-intensity opening establishing combat", source_segments=(segment,),
+        variant_id="variant-1", parent_candidate_id="candidate-1", payoff_events=(event_payload,),
+        primary_anchor=event_payload, anchor_event_time=3.0, anchor_event_type="kill",
+        anchor_event_strength=0.9, anchor_event_confidence=0.9, event_timeline=3.0,
+        event_sync_offset=0.041, cut_sync_offset=-0.012,
+    )
+    edit = V2EditDecisionList(
+        "preview_v2", config.music_file, 19.0, 74.252, 19.0, 74.252, 5.4,
+        "representative high-energy test interval", (shot,),
+    )
+
+    main._write_v2_edit(edit, config)
+    timeline = config.preview_v2_timeline_path.read_text(encoding="utf-8")
+
+    assert "Shot 01" in timeline
+    assert "Timeline: 00:00.000 - 00:05.400" in timeline
+    assert f"Source: {source}" in timeline
+    assert "Source range: 00:14.300 - 00:19.700" in timeline
+    assert "Score: 0.820" in timeline
+    assert "Duplicate group: group-1" in timeline
+    assert "Music: target 00:20.000; event strong_beat" in timeline
+    assert "Sync: event +41ms; cut -12ms" in timeline
+    assert "Transition: hard_cut" in timeline
+    assert "Reason: medium-intensity opening establishing combat" in timeline
 
 
 def test_v2_validation_rejects_repeated_duplicate_groups_and_bad_ranges(tmp_path, base_config):
