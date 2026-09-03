@@ -91,6 +91,8 @@ class PipelineConfig:
         output_root = self.output_dir.resolve(strict=False)
         if output == self.baseline_output_path.resolve(strict=False):
             raise ValueError("V2 output cannot collide with the immutable baseline")
+        if output == output_root:
+            raise ValueError("V2 output must be a file destination beneath output_dir")
         if not is_within(output, output_root):
             raise ValueError(f"V2 output must remain beneath output_dir: {output}")
         return output

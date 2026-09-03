@@ -91,6 +91,9 @@ def test_v2_output_rejects_baseline_collision_and_escape(base_config):
     with pytest.raises(ValueError, match="output_dir"):
         replace(base_config, v2_output_name="../outside.mp4").v2_output_path
 
+    with pytest.raises(ValueError, match="file destination"):
+        replace(base_config, v2_output_name=".").v2_output_path
+
 
 def test_v2_cache_key_requires_recorded_ffmpeg_version():
     with pytest.raises(ValueError, match="FFmpeg version"):
@@ -117,3 +120,12 @@ def test_v2_contract_mappings_are_immutable(tmp_path):
     with pytest.raises(TypeError):
         variant.penalty_values["downtime"] = 1.0
     assert variant.to_dict()["penalty_values"] == {"downtime": 0.0}
+
+
+def test_v2_serialization_recursively_converts_nested_contracts(tmp_path):
+    event = make_event("e1", 2.0)
+    payload = make_v2_shot(tmp_path, event).to_dict()
+
+    assert payload["source_segments"][0]["source"] == str((tmp_path / "clip.mp4").resolve())
+    assert payload["primary_anchor"]["event_id"] == "e1"
+    assert payload["payoff_events"][0]["type"] == "combat_climax"
