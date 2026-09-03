@@ -101,8 +101,13 @@ class CandidateVariant:
     uniqueness: float
     final_score: float
     duplicate_group: str | None
+    payoff_events: tuple[PayoffEvent, ...]
     primary_anchor: PayoffEvent | None
     secondary_anchors: tuple[PayoffEvent, ...]
+    anchor_event_time: float | None
+    anchor_event_type: str | None
+    anchor_event_strength: float | None
+    anchor_event_confidence: float | None
     context_integrity_score: float
     penalty_values: dict[str, float]
     source_signature: str
@@ -112,7 +117,7 @@ class CandidateVariant:
     rationale: str
 ~~~
 
-V2EditShot extends the V1 shot fields with source_segments, parent_candidate_id, variant_id, primary_anchor, secondary_anchors, context_integrity_score, condense_reason, event_timeline, event_sync_offset, cut_sync_offset, transition_compatibility_score, impact_cut, audio_j_cut_ms, and audio_l_cut_ms. V2EditDecisionList stores kind, music_source, baseline_music_in/out, V2 music_in/out, music_reason, duration, and an ordered tuple of V2EditShot values.
+V2EditShot extends the V1 shot fields with source_segments, parent_candidate_id, variant_id, payoff_events, anchor_event_time, anchor_event_type, anchor_event_strength, anchor_event_confidence, primary_anchor, secondary_anchors, context_integrity_score, condense_reason, event_timeline, event_sync_offset, cut_sync_offset, transition_compatibility_score, impact_cut, audio_j_cut_ms, and audio_l_cut_ms. V2EditDecisionList stores kind, music_source, baseline_music_in/out, V2 music_in/out, music_reason, duration, and an ordered tuple of V2EditShot values.
 
 ## Task 1: Versioned configuration, models, cache identity, and baseline guard
 
@@ -127,6 +132,7 @@ V2EditShot extends the V1 shot fields with source_segments, parent_candidate_id,
 - PipelineConfig gains V2 detector, ROI, condensation, beam, audio-overlap, output, and baseline fields.
 - PipelineConfig exposes `music_v2_analysis_dir -> Path` and versioned V2 artifact paths without changing V1 artifact locations.
 - Add model to_dict methods for PayoffEvent, SourceSegment, CandidateVariant, V2EditShot, and V2EditDecisionList.
+- Preserve payoff_events and anchor_event_time/type/strength/confidence on candidate and shot artifacts.
 - Add baseline_manifest(path: Path) -> dict[str, object].
 - Add assert_baseline_unchanged(before: dict[str, object], path: Path) -> None.
 - Add v2_cache_key(source_fingerprint: dict[str, object], stage: str, parameters: dict[str, object]) -> str.
@@ -160,7 +166,7 @@ def test_baseline_guard_detects_change(tmp_path):
 
 - [ ] **Step 2: Run D:/miniconda/python.exe -m pytest -q tests/test_v2_contracts.py and confirm failure because the V2 fields/helpers are absent.**
 - [ ] **Step 3: Add config values: baseline_music_in/out 19.0/74.252, v2_output_name preview_60s_v2.mp4, payoff_analysis_fps 6.0, event_merge_window_ms 700, strong/weak thresholds 0.75/0.55, max_anchor_count_per_candidate 3, preferred macro duration 2–10s, hero maximum 12s, beam_width 16, beam_max_expansions 32, recent source/environment windows 2, baseline_music_max_shift 0.5, audio overlap 100–250ms, impact tail maximum 400ms, all v2_weights, beam_weights, penalty_weights, and normalized roi_profile values.**
-- [ ] **Step 4: Implement immutable dataclasses and serialization. Require at least one source segment and validate each segment duration against source_out - source_in within 1ms. Serialize paths as absolute strings and tuples as arrays.**
+- [ ] **Step 4: Implement immutable dataclasses and serialization. Require at least one source segment and validate each segment duration against source_out - source_in within 1ms. Preserve payoff_events and anchor event metadata. Serialize paths as absolute strings and tuples as arrays.**
 - [ ] **Step 5: Implement baseline_manifest with resolved path, size, mtime, and SHA-256. Implement v2_cache_key from sorted JSON containing source fingerprint, stage/version, FFmpeg version, and parameters.**
 - [ ] **Step 6: Run the focused test again, run git diff --check, and commit:**
 
@@ -402,7 +408,7 @@ git commit -m "feat: align payoff anchors and score natural cuts"
 - [ ] **Step 3: Keep at most beam_width states (initial 16) and at most beam_max_expansions (initial 32) options per variant. Consider only nearby phrase/bar, primary strong/downbeat, secondary beat/onset, and context-safe fallback placements.**
 - [ ] **Step 4: Score each expansion with configured weights highlight_quality .35, music_fit .25, transition_compatibility .15, diversity .15, energy_curve_fit .10, then subtract context, duplicate, same_source_recent, same_environment_recent, downtime, no-payoff, and sync penalties.**
 - [ ] **Step 5: Use the piecewise timeline target: 0–20% build, 20–45% first payoff/rise, 45–60% release, 60–85% escalation, 85–100% strongest payoff/Hero Play. Preserve a stronger finale when quality is comparable.**
-- [ ] **Step 6: Populate source_segments, primary/secondary anchors, event_timeline, event/cut offsets, transition score, impact metadata, audio overlap metadata, rationale, section, and condense_reason. Write preview_v2_edit.json and preview_v2_timeline.txt before any renderer call.**
+- [ ] **Step 6: Populate source_segments, payoff_events, anchor event metadata, primary/secondary anchors, event_timeline, event/cut offsets, transition score, impact metadata, audio overlap metadata, rationale, section, and condense_reason. Write preview_v2_edit.json and preview_v2_timeline.txt before any renderer call.**
 - [ ] **Step 7: Validate source paths below raw, source ranges, unique duplicate groups, anchor/rationale presence, jump-cut reasons, 45–60 second duration, and the no-three-long-segments rule.**
 - [ ] **Step 8: Run focused tests and commit:**
 
