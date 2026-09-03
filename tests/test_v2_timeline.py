@@ -111,6 +111,35 @@ def test_missing_boundary_evidence_is_conservative():
     assert transition_compatibility_score(descriptor, descriptor) < 1.0
 
 
+def test_boundary_window_uses_configured_milliseconds(tmp_path, base_config):
+    candidate = variant(tmp_path)
+    configured = replace(base_config, boundary_window_ms=700)
+    analysis = VideoAnalysis(
+        candidate.source_file, 10.0, [9.4], [0.9], [0.7], [0.2], [0.8], [0.9], [0.6],
+    )
+
+    descriptor = describe_variant_boundary(
+        candidate, analysis, "end", boundary_window_ms=configured.boundary_window_ms
+    )
+
+    assert descriptor.confidence >= 0.5
+    assert descriptor.motion_strength == 0.9
+
+
+def test_non_edge_analysis_samples_keep_boundary_evidence_low_confidence(tmp_path, base_config):
+    candidate = variant(tmp_path)
+    analysis = VideoAnalysis(
+        candidate.source_file, 10.0, [2.0], [0.9], [0.7], [0.2], [0.8], [0.9], [0.6],
+    )
+
+    descriptor = describe_variant_boundary(
+        candidate, analysis, "end", boundary_window_ms=base_config.boundary_window_ms
+    )
+
+    assert descriptor.confidence < 0.5
+    assert transition_compatibility_score(descriptor, descriptor) < 1.0
+
+
 def test_impact_metadata_requires_natural_impact_evidence(tmp_path):
     previous = variant(tmp_path, anchor=event("a", "kill", 8.0))
     no_impact = replace(previous, primary_anchor=PayoffEvent("b", "kill", 8.0, 0.9, 0.9, 0.8, {}))
@@ -123,6 +152,16 @@ def test_weak_natural_impact_evidence_does_not_mark_impact_cut(tmp_path):
     weak_impact = replace(previous, primary_anchor=PayoffEvent("b", "kill", 8.0, 0.9, 0.9, 0.8, {"impact": 0.1}))
 
     assert choose_v2_transition(previous, weak_impact).impact_cut is False
+
+
+def test_audio_impact_is_natural_impact_evidence(tmp_path):
+    previous = variant(tmp_path, anchor=event("a", "kill", 8.0))
+    current = replace(
+        previous,
+        primary_anchor=PayoffEvent("b", "combat_climax", 8.0, 0.9, 0.9, 0.4, {"audio_impact": 0.5}),
+    )
+
+    assert choose_v2_transition(previous, current).impact_cut is True
 
 
 def test_transition_selects_one_audio_overlap_mode(tmp_path):

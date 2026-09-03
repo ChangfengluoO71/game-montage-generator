@@ -119,15 +119,20 @@ def transition_compatibility_score(previous: BoundaryDescriptor, current: Bounda
     return round(max(0.0, min(1.0, score)), 6)
 
 
-def choose_v2_transition(previous: CandidateVariant, current: CandidateVariant) -> TransitionDecision:
-    before = describe_variant_boundary(previous, None, "end")
-    after = describe_variant_boundary(current, None, "start")
+def choose_v2_transition(
+    previous: CandidateVariant, current: CandidateVariant, config: PipelineConfig | None = None
+) -> TransitionDecision:
+    boundary_window_ms = config.boundary_window_ms if config is not None else 500
+    before = describe_variant_boundary(previous, None, "end", boundary_window_ms=boundary_window_ms)
+    after = describe_variant_boundary(current, None, "start", boundary_window_ms=boundary_window_ms)
     compatibility = transition_compatibility_score(before, after)
     impact_value = 0.0
     if current.primary_anchor:
         impact_value = max(
             (float(current.primary_anchor.evidence.get(key, 0.0))
-             for key in ("natural_flash", "muzzle_flash", "explosion", "impact", "impact_strength")),
+             for key in (
+                 "natural_flash", "muzzle_flash", "explosion", "impact", "impact_strength", "audio_impact"
+             )),
             default=0.0,
         )
     impact = impact_value >= _NATURAL_IMPACT_THRESHOLD

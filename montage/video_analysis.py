@@ -31,7 +31,11 @@ def normalize_signal(values: Sequence[float]) -> list[float]:
 
 
 def describe_variant_boundary(
-    variant: CandidateVariant, analysis: VideoAnalysis | None, side: Literal["start", "end"]
+    variant: CandidateVariant,
+    analysis: VideoAnalysis | None,
+    side: Literal["start", "end"],
+    *,
+    boundary_window_ms: int | float = 500,
 ) -> BoundaryDescriptor:
     """Describe only the small source edge used for a natural gameplay cut."""
     if side not in {"start", "end"}:
@@ -39,8 +43,10 @@ def describe_variant_boundary(
     segment = variant.source_segments[0] if side == "start" else variant.source_segments[-1]
     edge = segment.source_in if side == "start" else segment.source_out
     values: dict[str, float] = {}
+    has_edge_evidence = False
     if analysis is not None and analysis.times:
-        window = 0.5
+        # Config stores this tolerance in milliseconds; analysis timestamps are seconds.
+        window = max(0.0, float(boundary_window_ms)) / 1000.0
         selected = [i for i, timestamp in enumerate(analysis.times) if abs(timestamp - edge) <= window]
         if selected:
             def mean(name: str, fallback: float = 0.5) -> float:
@@ -53,9 +59,10 @@ def describe_variant_boundary(
                 "visual_tone": mean("visual"),
                 "impact_strength": max(mean("audio", 0.0), mean("activity", 0.0)),
             }
+            has_edge_evidence = True
     if not values:
         values = {"motion_strength": 0.5, "luminance": 0.5, "visual_tone": 0.5, "impact_strength": 0.0}
-    direction = "forward" if analysis is not None and analysis.times and variant.motion >= 0.55 else "neutral"
+    direction = "forward" if has_edge_evidence and variant.motion >= 0.55 else "neutral"
     ads = "ads" if variant.weapon_or_view_signature.lower() in {"ads", "aim", "scoped"} else "unknown"
     return BoundaryDescriptor(
         motion_direction=direction,
@@ -63,7 +70,7 @@ def describe_variant_boundary(
         ads_state=ads,
         environment_signature=variant.environment_signature,
         source_signature=variant.source_signature,
-        confidence=0.8 if analysis is not None and analysis.times else 0.25,
+        confidence=0.8 if has_edge_evidence else 0.25,
         **values,
     )
 
