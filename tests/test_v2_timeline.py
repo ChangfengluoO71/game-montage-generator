@@ -5,6 +5,7 @@ import pytest
 
 from montage.models import BoundaryDescriptor, CandidateVariant, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
 from montage.models import EditDecisionList, V2EditDecisionList
+import montage.beam_timeline as beam_timeline
 from montage.beam_timeline import BeamState, build_v2_preview_edit, expand_beam, validate_v2_edit, _expansion_score
 from montage.transitions import (
     choose_anchor_music_target,
@@ -217,7 +218,7 @@ def baseline_edit_for_timeline() -> EditDecisionList:
 
 
 def test_v2_beam_builds_bounded_payoff_aware_edit(tmp_path, base_config):
-    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", beam_max_expansions=1000)
     variants = [timeline_variant(tmp_path, index) for index in range(10)]
 
     edit = build_v2_preview_edit(variants, music(), baseline_edit_for_timeline(), config)
@@ -272,7 +273,7 @@ def test_beam_penalizes_recent_source_and_environment_reuse(tmp_path, base_confi
 
 
 def test_finale_prefers_hero_play_when_quality_is_comparable(tmp_path, base_config):
-    config = replace(base_config, raw_dir=tmp_path / "raw")
+    config = replace(base_config, raw_dir=tmp_path / "raw", beam_max_expansions=1000)
     regular = [timeline_variant(tmp_path, index, quality=0.80) for index in range(9)]
     hero = timeline_variant(tmp_path, 99, quality=0.79, anchor_type="hero_play")
 
@@ -338,10 +339,73 @@ def test_validation_rejects_segment_gap_and_mismatched_shot_range(tmp_path, base
     first = timeline_variant(tmp_path, 1)
     first.source_file.parent.mkdir(parents=True, exist_ok=True)
     first.source_file.write_bytes(b"raw")
-    gap = replace(first, source_segments=(SourceSegment(first.source_file, 0.0, 2.0, 2.0), SourceSegment(first.source_file, 3.0, 6.0, 3.0)), duration=5.0, condense_reason="phrase_boundary")
-    shot = _shot_for_test(gap)
-    with pytest.raises(ValueError, match="gap|chronological"):
-        validate_v2_edit(_edit_for_test([shot] * 8), config)
+    gap_segments = (SourceSegment(first.source_file, 0.0, 2.0, 2.0), SourceSegment(first.source_file, 3.0, 7.0, 4.0))
+    shot = replace(_shot_for_test(first), source_in=0.0, source_out=2.0, duration=6.0,
+                   source_segments=gap_segments, condense_reason="")
+    with pytest.raises(ValueError, match="condense_reason"):
+        validate_v2_edit(_edit_for_test([replace(shot, duplicate_group=f"d-{i}", variant_id=f"v-{i}",
+                                                  timeline_in=i * 6.0, timeline_out=(i + 1) * 6.0) for i in range(8)]), config)
+
+
+@pytest.mark.parametrize("reason", [
+    "downtime_removed", "phrase_boundary", "bar_boundary", "action_phase_change",
+    "substantial_spatial_change", "substantial_state_change",
+])
+def test_validation_allows_documented_condensed_source_gaps(tmp_path, base_config, reason):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = timeline_variant(tmp_path, 1)
+    first.source_file.parent.mkdir(parents=True, exist_ok=True)
+    first.source_file.write_bytes(b"raw")
+    condensed = replace(
+        first,
+        source_segments=(
+            SourceSegment(first.source_file, 0.0, 2.0, 2.0),
+                SourceSegment(first.source_file, 3.0, 7.0, 4.0),
+        ),
+        duration=6.0,
+        condense_reason=reason,
+    )
+
+    shots = [replace(_shot_for_test(condensed), source_in=0.0, source_out=2.0,
+                      duplicate_group=f"d-{i}", variant_id=f"v-{i}",
+                      timeline_in=i * 6.0, timeline_out=(i + 1) * 6.0) for i in range(8)]
+    validate_v2_edit(_edit_for_test(shots), config)
+
+
+@pytest.mark.parametrize("segments", [
+    (SourceSegment(Path("placeholder"), 0.0, 2.0, 2.0), SourceSegment(Path("placeholder"), 1.0, 4.0, 3.0)),
+    (SourceSegment(Path("placeholder"), 2.0, 4.0, 2.0), SourceSegment(Path("placeholder"), 0.0, 1.0, 1.0)),
+])
+def test_validation_rejects_overlapping_or_badly_ordered_segments(tmp_path, base_config, segments):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = timeline_variant(tmp_path, 1)
+    first.source_file.parent.mkdir(parents=True, exist_ok=True)
+    first.source_file.write_bytes(b"raw")
+    actual_segments = tuple(SourceSegment(first.source_file, segment.source_in, segment.source_out, segment.duration)
+                            for segment in segments)
+    shot = replace(
+        _shot_for_test(first),
+        source_in=actual_segments[0].source_in,
+        source_out=actual_segments[0].source_out,
+        duration=sum(segment.duration for segment in actual_segments),
+        source_segments=actual_segments,
+        condense_reason="phrase_boundary",
+    )
+    shots = [replace(shot, duplicate_group=f"d-{i}", variant_id=f"v-{i}",
+                      timeline_in=i * shot.duration, timeline_out=(i + 1) * shot.duration) for i in range(8)]
+
+    with pytest.raises(ValueError, match="overlap|ordering"):
+        validate_v2_edit(_edit_for_test(shots), config)
+
+
+def test_make_shot_legacy_source_range_uses_first_condensed_segment(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    condensed = two_segment_variant(tmp_path, event("p", "kill", 7.0))
+
+    shot = beam_timeline._make_shot(condensed, BeamState(), music(), config, 55.0)
+
+    assert (shot.source_in, shot.source_out) == (0.0, 3.0)
+    assert shot.source_segments[-1].source_out == 10.0
 
 
 def test_validation_requires_contiguous_timeline_from_zero_to_edit_duration(tmp_path, base_config):
@@ -356,7 +420,7 @@ def test_validation_requires_contiguous_timeline_from_zero_to_edit_duration(tmp_
 
 
 def test_hero_preference_has_quality_margin(tmp_path, base_config):
-    config = replace(base_config, raw_dir=tmp_path / "raw", hero_quality_margin=0.02)
+    config = replace(base_config, raw_dir=tmp_path / "raw", hero_quality_margin=0.02, beam_max_expansions=1000)
     regular = [timeline_variant(tmp_path, index, quality=0.80) for index in range(9)]
     weak_hero = timeline_variant(tmp_path, 99, quality=0.60, anchor_type="hero_play")
 
@@ -375,7 +439,23 @@ def test_duration_limits_allow_documented_context_exception_only(tmp_path, base_
     assert not _duration_allowed(13.0, "hero_play", "", 1.0, config)
 
 
-def test_expansion_cap_is_per_state_and_dynamic_energy_uses_target_duration(tmp_path, base_config):
+def test_expansion_budget_is_global_and_independent_of_beam_width(tmp_path, base_config, monkeypatch):
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", beam_max_expansions=64, beam_width=2)
+    variants = [timeline_variant(tmp_path, i) for i in range(8)]
+    expansions = 0
+    original_make_shot = beam_timeline._make_shot
+
+    def observing_make_shot(*args, **kwargs):
+        nonlocal expansions
+        expansions += 1
+        return original_make_shot(*args, **kwargs)
+
+    monkeypatch.setattr(beam_timeline, "_make_shot", observing_make_shot)
+    build_v2_preview_edit(variants, music(), baseline_edit_for_timeline(), config)
+    assert expansions <= config.beam_max_expansions
+
+
+def test_dynamic_energy_uses_target_duration(tmp_path, base_config):
     config = replace(base_config, raw_dir=tmp_path / "raw", beam_max_expansions=1)
     variants = [timeline_variant(tmp_path, i) for i in range(3)]
     assert len(expand_beam(BeamState(), variants, music(), config)) == 1
@@ -401,6 +481,7 @@ def _shot_for_test(variant):
         variant_id=variant.variant_id, payoff_events=variant.payoff_events, primary_anchor=variant.primary_anchor,
         anchor_event_time=variant.anchor_event_time, anchor_event_type=variant.anchor_event_type,
         anchor_event_strength=variant.anchor_event_strength, anchor_event_confidence=variant.anchor_event_confidence,
+        condense_reason=variant.condense_reason,
     )
 
 

@@ -17,6 +17,16 @@ from .models import (
 from .transitions import choose_anchor_music_target, choose_v2_transition
 
 
+_CONDENSE_GAP_REASONS = frozenset({
+    "downtime_removed",
+    "phrase_boundary",
+    "bar_boundary",
+    "action_phase_change",
+    "substantial_spatial_change",
+    "substantial_state_change",
+})
+
+
 @dataclass(frozen=True)
 class BeamState:
     shots: tuple[V2EditShot, ...] = ()
@@ -114,7 +124,7 @@ def _make_shot(
     return V2EditShot(
         source=variant.source_file,
         source_in=variant.source_segments[0].source_in,
-        source_out=variant.source_segments[-1].source_out,
+        source_out=variant.source_segments[0].source_out,
         duration=variant.duration,
         candidate_score=variant.final_score,
         duplicate_group=variant.duplicate_group or f"auto-{variant.variant_id}",
@@ -205,15 +215,18 @@ def _expansion_score(variant: CandidateVariant, state: BeamState, shot: V2EditSh
 
 def expand_beam(state: BeamState, variants: Sequence[CandidateVariant], music: MusicAnalysis,
                 config: PipelineConfig, *, baseline_music_in: float | None = None,
-                expansion_budget: int | None = None, hero_quality_floor: float = 0.0) -> list[BeamState]:
+                expansion_budget: int | None = None, hero_quality_floor: float = 0.0,
+                expansion_counter: list[int] | None = None) -> list[BeamState]:
     """Expand one state with a bounded, deterministic set of unused variants.
 
-    ``beam_max_expansions`` is deliberately a per-state option cap. The caller
-    may pass ``expansion_budget`` when composing a stricter global search.
+    ``expansion_budget`` caps this call. When ``expansion_counter`` is shared
+    by the caller, the cap applies to the whole search rather than each state.
     """
     options: list[BeamState] = []
     for variant in sorted(variants, key=lambda item: (-item.final_score, item.variant_id)):
         limit = config.beam_max_expansions if expansion_budget is None else expansion_budget
+        if expansion_counter is not None:
+            limit -= expansion_counter[0]
         if len(options) >= max(0, limit):
             break
         group = variant.duplicate_group or f"auto-{variant.variant_id}"
@@ -228,6 +241,8 @@ def expand_beam(state: BeamState, variants: Sequence[CandidateVariant], music: M
             continue
         if not _duration_allowed(variant.duration, variant.anchor_event_type, variant.condense_reason, variant.context_integrity_score, config):
             continue
+        if expansion_counter is not None:
+            expansion_counter[0] += 1
         shot = _make_shot(variant, state, music, config, state.target_duration or config.preview_max_duration, baseline_music_in)
         score = _expansion_score(variant, state, shot, music, config, hero_quality_floor)
         sources = (state.recent_sources + (variant.source_signature,))[-max(1, config.recent_source_window):]
@@ -265,6 +280,7 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
     completed: list[BeamState] = []
     ordinary_quality = max((variant.final_score for variant in variants if variant.anchor_event_type not in {"hero_play", "hero", "finale"}), default=0.0)
     hero_quality_floor = ordinary_quality - config.hero_quality_margin
+    expansion_counter = [0]
     for _ in range(14):
         next_states: list[BeamState] = []
         for state in states:
@@ -272,7 +288,11 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
                 completed.append(state)
             if len(state.shots) < 14 and state.elapsed < target_max - 1e-6:
                 next_states.extend(expand_beam(state, variants, music, config, baseline_music_in=baseline_edit.music_in,
-                                               hero_quality_floor=hero_quality_floor))
+                                               hero_quality_floor=hero_quality_floor,
+                                               expansion_budget=config.beam_max_expansions,
+                                               expansion_counter=expansion_counter))
+                if expansion_counter[0] >= max(0, config.beam_max_expansions):
+                    break
         if not next_states:
             break
         states = sorted(next_states, key=lambda item: item.score, reverse=True)[:max(1, config.beam_width)]
@@ -365,11 +385,18 @@ def validate_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
             raise ValueError("source range is invalid")
         if any(not is_within(segment.source.resolve(strict=False), config.raw_dir) or not segment.source.is_file() for segment in shot.source_segments):
             raise ValueError("source segment source must be an existing regular file below raw")
-        if abs(shot.source_in - shot.source_segments[0].source_in) > 0.001 or abs(shot.source_out - shot.source_segments[-1].source_out) > 0.001:
-            raise ValueError("shot source range does not match ordered source segments")
+        if abs(shot.source_in - shot.source_segments[0].source_in) > 0.001 or abs(shot.source_out - shot.source_segments[0].source_out) > 0.001:
+            raise ValueError("shot source range does not match first source segment")
+        if len(shot.source_segments) == 2 and shot.condense_reason not in _CONDENSE_GAP_REASONS:
+            raise ValueError("two source segments require an explicit valid condense_reason")
+        if len(shot.source_segments) == 1 and shot.condense_reason:
+            raise ValueError("continuous source segment cannot have a condense_reason")
         for previous_segment, next_segment in zip(shot.source_segments, shot.source_segments[1:]):
-            if abs(next_segment.source_in - previous_segment.source_out) > 0.001:
-                raise ValueError("source segments contain a gap or overlap")
+            gap = next_segment.source_in - previous_segment.source_out
+            if gap < -0.001 or next_segment.source_in < previous_segment.source_in - 0.001:
+                raise ValueError("source segments contain an overlap or bad ordering")
+            if gap > 0.001 and not (len(shot.source_segments) == 2 and shot.condense_reason in _CONDENSE_GAP_REASONS):
+                raise ValueError("source segments contain an unexplained gap")
         if abs(sum(segment.duration for segment in shot.source_segments) - shot.duration) > 0.01:
             raise ValueError("source segment durations do not match shot duration")
         if not shot.rationale.strip():
