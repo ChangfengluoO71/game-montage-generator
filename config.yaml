@@ -37,6 +37,7 @@ max_anchor_count_per_candidate: 3
 preferred_macro_duration: [2.0, 10.0]
 hero_max_duration: 12.0
 beam_width: 16
+# Maximum candidate options generated for each BeamState expansion.
 beam_max_expansions: 32
 recent_source_window: 2
 recent_environment_window: 2
@@ -47,6 +48,7 @@ minimum_context_integrity: 0.70
 rapid_multikill_window_s: 4.0
 rapid_multikill_min_events: 2
 rapid_multikill_bonus_weight: 0.12
+hero_quality_margin: 0.05
 v2_weights:
   payoff_score: 0.25
   human_selection_prior: 0.15

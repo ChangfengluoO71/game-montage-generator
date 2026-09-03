@@ -316,6 +316,9 @@ class V2EditShot(Serializable):
     impact_cut: bool = False
     audio_j_cut_ms: int = 0
     audio_l_cut_ms: int = 0
+    source_signature: str = ""
+    environment_signature: str = ""
+    weapon_or_view_signature: str = ""
 
     def __post_init__(self) -> None:
         if not self.source_segments:

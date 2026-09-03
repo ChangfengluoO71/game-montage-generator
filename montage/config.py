@@ -69,6 +69,7 @@ class PipelineConfig:
     rapid_multikill_window_s: float
     rapid_multikill_min_events: int
     rapid_multikill_bonus_weight: float
+    hero_quality_margin: float
     v2_weights: dict[str, float]
     beam_weights: dict[str, float]
     penalty_weights: dict[str, float]
@@ -256,6 +257,7 @@ def load_config(path: Path) -> PipelineConfig:
         rapid_multikill_window_s=float(raw.get("rapid_multikill_window_s", 4.0)),
         rapid_multikill_min_events=int(raw.get("rapid_multikill_min_events", 2)),
         rapid_multikill_bonus_weight=float(raw.get("rapid_multikill_bonus_weight", 0.12)),
+        hero_quality_margin=float(raw.get("hero_quality_margin", 0.05)),
         v2_weights=v2_weights,
         beam_weights=beam_weights,
         penalty_weights=penalty_weights,

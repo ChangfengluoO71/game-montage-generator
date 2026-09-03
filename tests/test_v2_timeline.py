@@ -5,7 +5,7 @@ import pytest
 
 from montage.models import BoundaryDescriptor, CandidateVariant, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
 from montage.models import EditDecisionList, V2EditDecisionList
-from montage.beam_timeline import BeamState, build_v2_preview_edit, expand_beam, validate_v2_edit
+from montage.beam_timeline import BeamState, build_v2_preview_edit, expand_beam, validate_v2_edit, _expansion_score
 from montage.transitions import (
     choose_anchor_music_target,
     choose_v2_transition,
@@ -29,6 +29,9 @@ def music() -> MusicAnalysis:
 
 def variant(tmp_path: Path, *, anchor: PayoffEvent | None = None, signature: str = "env") -> CandidateVariant:
     source = tmp_path / "clip.mp4"
+    if tmp_path != Path("."):
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.touch(exist_ok=True)
     segment = SourceSegment(source, 2.0, 10.0, 8.0)
     return CandidateVariant(
         variant_id="v", parent_candidate_id="c", source_file=source, source_segments=(segment,), duration=8.0,
@@ -193,6 +196,8 @@ def timeline_variant(tmp_path: Path, index: int, *, duration: float = 6.0, quali
                      anchor_type: str = "kill") -> CandidateVariant:
     raw = tmp_path / "raw"
     source = raw / f"clip-{index}.mp4"
+    raw.mkdir(parents=True, exist_ok=True)
+    source.touch(exist_ok=True)
     segment = SourceSegment(source, 0.0, duration, duration)
     payoff = event(f"payoff-{index}", anchor_type, duration - 1.0, strength=quality)
     return replace(
@@ -274,3 +279,130 @@ def test_finale_prefers_hero_play_when_quality_is_comparable(tmp_path, base_conf
     edit = build_v2_preview_edit(regular + [hero], music(), baseline_edit_for_timeline(), config)
 
     assert edit.shots[-1].anchor_event_type == "hero_play"
+
+
+def test_music_placement_uses_supplied_baseline_edit_start(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    candidate = timeline_variant(tmp_path, 1)
+    state = BeamState()
+    from montage.beam_timeline import _make_shot
+
+    shot = _make_shot(candidate, state, music(), config, 55.0, baseline_music_in=31.0)
+
+    assert shot.music_target == 31.0
+
+
+def test_rapid_multikill_bonus_is_not_added_twice(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    candidate = replace(timeline_variant(tmp_path, 1), final_score=0.8, rapid_multikill_bonus=0.12)
+    from montage.beam_timeline import _make_shot, _expansion_score
+
+    shot = _make_shot(candidate, BeamState(), music(), config, 55.0)
+    score = _expansion_score(candidate, BeamState(), shot, music(), config)
+    control = replace(candidate, rapid_multikill_bonus=0.0)
+    control_shot = _make_shot(control, BeamState(), music(), config, 55.0)
+
+    assert score == _expansion_score(control, BeamState(), control_shot, music(), config)
+
+
+def test_previous_shot_signatures_survive_transition_reconstruction(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = replace(timeline_variant(tmp_path, 1), source_signature="src-a", environment_signature="env-a", weapon_or_view_signature="ads")
+    second = replace(timeline_variant(tmp_path, 2), source_signature="src-b", environment_signature="env-b")
+    expanded = expand_beam(BeamState(), [first], music(), config)
+    next_states = expand_beam(expanded[0], [second], music(), config)
+
+    assert next_states[0].shots[0].source_signature == "src-a"
+    assert next_states[0].shots[0].environment_signature == "env-a"
+    assert next_states[0].shots[0].weapon_or_view_signature == "ads"
+
+
+def test_validation_rejects_missing_or_directory_sources(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = timeline_variant(tmp_path, 1)
+    shot = _shot_for_test(first)
+    edit = _edit_for_test([shot] * 8)
+    first.source_file.unlink()
+
+    with pytest.raises(ValueError, match="regular file"):
+        validate_v2_edit(edit, config)
+
+    first.source_file.parent.mkdir(parents=True, exist_ok=True)
+    first.source_file.mkdir(exist_ok=True)
+    with pytest.raises(ValueError, match="regular file"):
+        validate_v2_edit(edit, config)
+
+
+def test_validation_rejects_segment_gap_and_mismatched_shot_range(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = timeline_variant(tmp_path, 1)
+    first.source_file.parent.mkdir(parents=True, exist_ok=True)
+    first.source_file.write_bytes(b"raw")
+    gap = replace(first, source_segments=(SourceSegment(first.source_file, 0.0, 2.0, 2.0), SourceSegment(first.source_file, 3.0, 6.0, 3.0)), duration=5.0, condense_reason="phrase_boundary")
+    shot = _shot_for_test(gap)
+    with pytest.raises(ValueError, match="gap|chronological"):
+        validate_v2_edit(_edit_for_test([shot] * 8), config)
+
+
+def test_validation_requires_contiguous_timeline_from_zero_to_edit_duration(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = timeline_variant(tmp_path, 1)
+    first.source_file.parent.mkdir(parents=True, exist_ok=True)
+    first.source_file.write_bytes(b"raw")
+    shots = [_shot_for_test(replace(first, variant_id=f"v-{i}", duplicate_group=f"d-{i}")) for i in range(8)]
+    invalid = replace(_edit_for_test(shots), shots=tuple(replace(s, timeline_in=1.0 if i == 0 else s.timeline_in, timeline_out=(s.timeline_out + 1.0 if i == 7 else s.timeline_out)) for i, s in enumerate(shots)))
+    with pytest.raises(ValueError, match="timeline"):
+        validate_v2_edit(invalid, config)
+
+
+def test_hero_preference_has_quality_margin(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw", hero_quality_margin=0.02)
+    regular = [timeline_variant(tmp_path, index, quality=0.80) for index in range(9)]
+    weak_hero = timeline_variant(tmp_path, 99, quality=0.60, anchor_type="hero_play")
+
+    edit = build_v2_preview_edit(regular + [weak_hero], music(), baseline_edit_for_timeline(), config)
+
+    assert edit.shots[-1].anchor_event_type != "hero_play"
+
+
+def test_duration_limits_allow_documented_context_exception_only(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    candidate = timeline_variant(tmp_path, 1, duration=11.0)
+    from montage.beam_timeline import _duration_allowed
+
+    assert not _duration_allowed(11.0, "kill", "", 1.0, config)
+    assert _duration_allowed(11.0, "kill", "phrase_boundary", 1.0, config)
+    assert not _duration_allowed(13.0, "hero_play", "", 1.0, config)
+
+
+def test_expansion_cap_is_per_state_and_dynamic_energy_uses_target_duration(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw", beam_max_expansions=1)
+    variants = [timeline_variant(tmp_path, i) for i in range(3)]
+    assert len(expand_beam(BeamState(), variants, music(), config)) == 1
+
+    candidate = variants[0]
+    from montage.beam_timeline import _make_shot
+    short_state = BeamState(target_duration=45.0)
+    long_state = BeamState(target_duration=60.0)
+    short_score = _expansion_score(candidate, short_state, _make_shot(candidate, short_state, music(), config, 45.0), music(), config)
+    long_score = _expansion_score(candidate, long_state, _make_shot(candidate, long_state, music(), config, 60.0), music(), config)
+    assert short_score != long_score
+
+
+def _shot_for_test(variant):
+    from montage.models import V2EditShot
+    return V2EditShot(
+        source=variant.source_file, source_in=variant.source_segments[0].source_in,
+        source_out=variant.source_segments[-1].source_out, duration=variant.duration,
+        candidate_score=variant.final_score, duplicate_group=variant.duplicate_group or variant.variant_id,
+        timeline_in=0.0, timeline_out=variant.duration, transition="hard_cut", music_target=20.0,
+        music_event_type="beat", sync_offset=0.0, rationale="setup action payoff tail",
+        source_segments=variant.source_segments, parent_candidate_id=variant.parent_candidate_id,
+        variant_id=variant.variant_id, payoff_events=variant.payoff_events, primary_anchor=variant.primary_anchor,
+        anchor_event_time=variant.anchor_event_time, anchor_event_type=variant.anchor_event_type,
+        anchor_event_strength=variant.anchor_event_strength, anchor_event_confidence=variant.anchor_event_confidence,
+    )
+
+
+def _edit_for_test(shots):
+    return V2EditDecisionList("preview_v2", Path("music.wav"), 19.0, 74.252, 19.0, 74.252, 48.0, "locked", tuple(shots))
