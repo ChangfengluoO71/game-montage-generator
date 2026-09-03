@@ -1,11 +1,12 @@
 from dataclasses import replace
+import json
 from pathlib import Path
 import wave
 
 import numpy as np
 import pytest
 
-from montage.music_analysis import analyze_music_v2, choose_v2_music_window
+from montage.music_analysis import _downbeat_attempts, analyze_music_v2, choose_v2_music_window
 from montage.models import EditDecisionList
 
 
@@ -61,6 +62,9 @@ def test_window_stays_at_baseline_without_better_boundary():
 def test_v2_music_uses_separate_artifacts(music_config, fake_toolchain):
     analysis, decision = analyze_music_v2(music_config, fake_toolchain, make_baseline_edit())
     assert (music_config.music_v2_analysis_dir / "beat_map_v2.json").exists()
+    assert (music_config.music_v2_analysis_dir / "music_structure_v2.json").exists()
+    assert (music_config.music_v2_analysis_dir / "energy_curve_v2.csv").exists()
+    assert (music_config.music_v2_analysis_dir / "music_analysis_v2.png").exists()
     assert decision.baseline_music_in == 19.0
 
 
@@ -68,3 +72,40 @@ def test_percussive_confidence_is_recorded(music_config, fake_toolchain):
     analysis, _ = analyze_music_v2(music_config, fake_toolchain, make_baseline_edit())
     assert "percussive" in analysis.confidence
     assert "phrase" in analysis.confidence
+
+
+def test_v2_cache_invalidates_when_baseline_window_changes(music_config, fake_toolchain):
+    analyze_music_v2(music_config, fake_toolchain, make_baseline_edit())
+    first_key = json.loads(music_config.music_v2_cache_path.read_text(encoding="utf-8"))["cache_key"]
+
+    _, decision = analyze_music_v2(
+        music_config,
+        fake_toolchain,
+        replace(make_baseline_edit(), music_in=20.0, music_out=75.0),
+    )
+
+    assert decision.baseline_music_in == 20.0
+    assert decision.baseline_music_out == 75.0
+
+    analyze_music_v2(replace(music_config, baseline_music_max_shift=0.25), fake_toolchain, make_baseline_edit())
+    assert json.loads(music_config.music_v2_cache_path.read_text(encoding="utf-8"))["cache_key"] != first_key
+
+
+def test_steady_beat_grid_cannot_move_baseline_as_a_phrase():
+    structure = {
+        "phrase_boundaries": [{"timestamp": 19.2, "confidence": 0.98, "support": "beat_grid_only"}],
+        "phrase_confidence": 0.98,
+        "regions": [],
+    }
+
+    decision = choose_v2_music_window(structure, 19.0, 74.252, 230.0, 0.5)
+
+    assert decision.changed is False
+    assert decision.v2_music_in == 19.0
+
+
+def test_downbeats_remain_low_confidence_heuristic_attempts():
+    attempts, confidence = _downbeat_attempts(np.arange(0.0, 32.0, 0.5))
+
+    assert attempts == list(np.arange(0.0, 32.0, 2.0))
+    assert confidence <= 0.25

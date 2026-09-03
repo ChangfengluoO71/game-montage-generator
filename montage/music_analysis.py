@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .cache import atomic_write_bytes, cache_key, file_fingerprint, read_cached_json, write_cached_json
+from .cache import atomic_write_bytes, cache_key, file_fingerprint, read_cached_json, v2_cache_key, write_cached_json
 from .config import PipelineConfig
 from .models import EditDecisionList, MusicAnalysis
 from .toolchain import Toolchain
@@ -54,10 +54,15 @@ def _beat_stability(beat_times: Sequence[float]) -> float:
 
 
 def _phrase_boundaries(beat_times: Sequence[float]) -> tuple[list[float], float]:
+    del beat_times
+    # Beat regularity only supplies a grid; it cannot establish musical phrase semantics.
+    return [], 0.0
+
+
+def _downbeat_attempts(beat_times: Sequence[float]) -> tuple[list[float], float]:
+    """Expose a beat-grid-derived downbeat attempt without claiming meter knowledge."""
     beats = np.asarray(list(beat_times), dtype=float)
-    if beats.size < 16:
-        return [], 0.0
-    return beats[::16].astype(float).tolist(), _beat_stability(beats) * min(1.0, beats.size / 64.0)
+    return beats[::4].astype(float).tolist(), 0.20
 
 
 def choose_v2_music_window(
@@ -67,27 +72,29 @@ def choose_v2_music_window(
     baseline_in = round(float(baseline_in), 3)
     baseline_out = round(float(baseline_out), 3)
     max_shift = max(0.0, float(max_shift))
-    candidates: list[tuple[float, float, str]] = []
+    candidates: list[tuple[float, float, str, bool]] = []
     for item in structure.get("phrase_boundaries", []) if isinstance(structure.get("phrase_boundaries"), list) else []:
         if isinstance(item, dict):
             timestamp = float(item.get("timestamp", -1.0))
             confidence = float(item.get("confidence", 0.0))
+            independently_supported = item.get("support") not in {None, "beat_grid_only", "unsupported"}
         else:
             timestamp, confidence = float(item), float(structure.get("phrase_confidence", 0.0))
-        candidates.append((timestamp, confidence, "phrase"))
+            independently_supported = False
+        candidates.append((timestamp, confidence, "phrase", independently_supported))
     regions = structure.get("regions")
     if isinstance(regions, list):
         for region in regions[1:]:
             if isinstance(region, dict):
-                candidates.append((float(region.get("start", -1.0)), float(region.get("confidence", 0.0)), "section"))
+                candidates.append((float(region.get("start", -1.0)), float(region.get("confidence", 0.0)), "section", True))
     for item in structure.get("boundaries", []) if isinstance(structure.get("boundaries"), list) else []:
         if isinstance(item, dict):
-            candidates.append((float(item.get("timestamp", -1.0)), float(item.get("confidence", 0.0)), str(item.get("type", "section"))))
+            candidates.append((float(item.get("timestamp", -1.0)), float(item.get("confidence", 0.0)), str(item.get("type", "section")), item.get("support") not in {None, "beat_grid_only", "unsupported"}))
 
     # A boundary must carry enough evidence to be materially better than an exact V1 lock.
-    eligible = [candidate for candidate in candidates if candidate[1] >= 0.70 and 0.0 <= candidate[0] <= duration]
+    eligible = [candidate for candidate in candidates if candidate[1] >= 0.70 and candidate[3] and 0.0 <= candidate[0] <= duration]
     endpoint_options: list[tuple[float, float, float, str]] = []
-    for timestamp, confidence, kind in eligible:
+    for timestamp, confidence, kind, _ in eligible:
         if 0.0 < abs(timestamp - baseline_in) <= max_shift:
             endpoint_options.append((confidence, -abs(timestamp - baseline_in), timestamp, f"Adjusted music in to a high-confidence heuristic {kind} boundary."))
         if 0.0 < abs(timestamp - baseline_out) <= max_shift:
@@ -539,8 +546,8 @@ def _write_v2_music_artifacts(
         axes[0].axvline(timestamp, color="#64748b", alpha=0.10, linewidth=0.5)
     for timestamp in analysis.strong_beats:
         axes[0].axvline(timestamp, color="#f59e0b", alpha=0.45, linewidth=0.8)
-    for timestamp in analysis.bars:
-        axes[0].axvline(timestamp, color="#0f172a", alpha=0.55, linewidth=1.0)
+    for index, timestamp in enumerate(analysis.bars):
+        axes[0].axvline(timestamp, color="#0f172a", alpha=0.55, linewidth=1.0, label="downbeat attempt" if index == 0 else None)
     axes[0].axvspan(decision.v2_music_in, decision.v2_music_out, color="#22c55e", alpha=0.10, label="locked V2 range")
     axes[0].set_ylabel("normalized signal")
     axes[0].legend(loc="upper right", ncol=2, fontsize=8)
@@ -571,8 +578,12 @@ def analyze_music_v2(
         "ffmpeg_version": toolchain.ffmpeg_version,
         "analysis_version": "hpss-aware-v2",
         "hop_length": 512,
+        "baseline_music_in": baseline_edit.music_in,
+        "baseline_music_out": baseline_edit.music_out,
+        "baseline_music_max_shift": config.baseline_music_max_shift,
+        "window_policy_version": "confidence-supported-boundaries-v2",
     }
-    key = cache_key(file_fingerprint(config.music_file), "music_analysis_v2", parameters)
+    key = v2_cache_key(file_fingerprint(config.music_file), "music_analysis_v2", parameters)
     artifact_paths = (
         config.music_v2_beat_map_path,
         config.music_v2_structure_path,
@@ -610,14 +621,14 @@ def analyze_music_v2(
     novelty = _normalize(np.abs(np.diff(energy, prepend=energy[0] if energy.size else 0.0)))
     structure = infer_music_structure(energy_times, energy, beats, percussive_onset_values)
     phrase_times, phrase_confidence = _phrase_boundaries(beats)
-    structure["phrase_boundaries"] = [{"timestamp": round(timestamp, 3), "confidence": round(phrase_confidence, 4)} for timestamp in phrase_times]
+    structure["phrase_boundaries"] = [{"timestamp": round(timestamp, 3), "confidence": round(phrase_confidence, 4), "support": "beat_grid_only"} for timestamp in phrase_times]
     structure["phrase_confidence"] = round(phrase_confidence, 4)
     structure["percussive_onset_at_energy"] = percussive_onset_at_energy.tolist()
     points = build_edit_points(tempo, beats, onsets, energy, energy_times)
     strong_beats = beats[::2].tolist()
-    downbeats = beats[::4].tolist()
+    downbeats, downbeat_confidence = _downbeat_attempts(beats)
     for timestamp in downbeats:
-        points.append({"timestamp": round(timestamp, 3), "strength": 0.8, "type": "downbeat", "confidence": round(_beat_stability(beats) * 0.65, 4)})
+        points.append({"timestamp": round(timestamp, 3), "strength": downbeat_confidence, "type": "downbeat_attempt", "confidence": downbeat_confidence})
     for boundary in structure["phrase_boundaries"]:
         points.append({"timestamp": boundary["timestamp"], "strength": boundary["confidence"], "type": "phrase", "confidence": boundary["confidence"]})
     for region in structure["regions"][1:]:
@@ -627,7 +638,7 @@ def analyze_music_v2(
         "beat": full_stability if beats is full_beats else percussive_stability,
         "strong_beat": (full_stability if beats is full_beats else percussive_stability) * 0.9,
         "bar": (full_stability if beats is full_beats else percussive_stability) * 0.7,
-        "downbeat": (full_stability if beats is full_beats else percussive_stability) * 0.65,
+        "downbeat": downbeat_confidence,
         "phrase": phrase_confidence,
         "section": float(structure.get("confidence", 0.0)),
         "onset": float(structure.get("onset_confidence", 0.0)),
