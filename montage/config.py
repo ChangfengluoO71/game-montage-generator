@@ -46,6 +46,27 @@ class PipelineConfig:
     preview_min_duration: float
     preview_max_duration: float
     preview_preferred_shot_max_duration: float
+    baseline_music_in: float
+    baseline_music_out: float
+    v2_output_name: str
+    payoff_analysis_fps: float
+    event_merge_window_ms: int
+    strong_anchor_threshold: float
+    weak_anchor_threshold: float
+    max_anchor_count_per_candidate: int
+    preferred_macro_duration: tuple[float, float]
+    hero_max_duration: float
+    beam_width: int
+    beam_max_expansions: int
+    recent_source_window: int
+    recent_environment_window: int
+    baseline_music_max_shift: float
+    audio_overlap_ms: tuple[int, int]
+    impact_tail_max_ms: int
+    v2_weights: dict[str, float]
+    beam_weights: dict[str, float]
+    penalty_weights: dict[str, float]
+    roi_profile: dict[str, Any]
     weights: dict[str, float]
     fast_montage_target: str | float
     full_highlight_target: float
@@ -59,6 +80,74 @@ class PipelineConfig:
     @property
     def music_analysis_dir(self) -> Path:
         return self.analysis_dir / "music"
+
+    @property
+    def music_v2_analysis_dir(self) -> Path:
+        return self.analysis_dir / "music_v2"
+
+    @property
+    def v2_output_path(self) -> Path:
+        return self.output_dir / self.v2_output_name
+
+    @property
+    def baseline_output_path(self) -> Path:
+        return self.output_dir / "preview_60s.mp4"
+
+    @property
+    def music_v2_beat_map_path(self) -> Path:
+        return self.music_v2_analysis_dir / "beat_map_v2.json"
+
+    @property
+    def music_v2_structure_path(self) -> Path:
+        return self.music_v2_analysis_dir / "music_structure_v2.json"
+
+    @property
+    def music_v2_energy_curve_path(self) -> Path:
+        return self.music_v2_analysis_dir / "energy_curve_v2.csv"
+
+    @property
+    def music_v2_analysis_image_path(self) -> Path:
+        return self.music_v2_analysis_dir / "music_analysis_v2.png"
+
+    @property
+    def payoff_events_v2_path(self) -> Path:
+        return self.analysis_dir / "payoff_events_v2.json"
+
+    @property
+    def highlight_candidates_v2_path(self) -> Path:
+        return self.analysis_dir / "highlight_candidates_v2.json"
+
+    @property
+    def highlight_candidates_v2_csv_path(self) -> Path:
+        return self.analysis_dir / "highlight_candidates_v2.csv"
+
+    @property
+    def dedupe_summary_v2_path(self) -> Path:
+        return self.analysis_dir / "dedupe_summary_v2.json"
+
+    @property
+    def preview_v2_analysis_dir(self) -> Path:
+        return self.analysis_dir / "preview"
+
+    @property
+    def preview_v2_edit_path(self) -> Path:
+        return self.preview_v2_analysis_dir / "preview_v2_edit.json"
+
+    @property
+    def preview_v2_timeline_path(self) -> Path:
+        return self.preview_v2_analysis_dir / "preview_v2_timeline.txt"
+
+    @property
+    def preview_v2_sync_report_path(self) -> Path:
+        return self.preview_v2_analysis_dir / "preview_v2_sync_report.json"
+
+    @property
+    def preview_v2_report_path(self) -> Path:
+        return self.preview_v2_analysis_dir / "preview_v2_report.md"
+
+    @property
+    def preview_v2_timeline_image_path(self) -> Path:
+        return self.preview_v2_analysis_dir / "preview_v2_timeline.png"
 
     @property
     def preview_analysis_dir(self) -> Path:
@@ -92,6 +181,9 @@ def load_config(path: Path) -> PipelineConfig:
     weights = {str(key): float(value) for key, value in (raw.get("weights") or {}).items()}
     nvenc = dict(raw.get("nvenc") or {})
     audio_mix = dict(raw.get("audio_mix") or {})
+    v2_weights = {str(key): float(value) for key, value in (raw.get("v2_weights") or {}).items()}
+    beam_weights = {str(key): float(value) for key, value in (raw.get("beam_weights") or {}).items()}
+    penalty_weights = {str(key): float(value) for key, value in (raw.get("penalty_weights") or {}).items()}
     target = raw.get("fast_montage_target", "music")
     if not isinstance(target, (str, int, float)):
         target = "music"
@@ -121,6 +213,27 @@ def load_config(path: Path) -> PipelineConfig:
         preview_min_duration=float(raw.get("preview_min_duration", 45.0)),
         preview_max_duration=float(raw.get("preview_max_duration", 60.0)),
         preview_preferred_shot_max_duration=float(raw.get("preview_preferred_shot_max_duration", 20.0)),
+        baseline_music_in=float(raw.get("baseline_music_in", 19.0)),
+        baseline_music_out=float(raw.get("baseline_music_out", 74.252)),
+        v2_output_name=str(raw.get("v2_output_name", "preview_60s_v2.mp4")),
+        payoff_analysis_fps=float(raw.get("payoff_analysis_fps", 6.0)),
+        event_merge_window_ms=int(raw.get("event_merge_window_ms", 700)),
+        strong_anchor_threshold=float(raw.get("strong_anchor_threshold", 0.75)),
+        weak_anchor_threshold=float(raw.get("weak_anchor_threshold", 0.55)),
+        max_anchor_count_per_candidate=int(raw.get("max_anchor_count_per_candidate", 3)),
+        preferred_macro_duration=tuple(float(v) for v in raw.get("preferred_macro_duration", [2.0, 10.0])),
+        hero_max_duration=float(raw.get("hero_max_duration", 12.0)),
+        beam_width=int(raw.get("beam_width", 16)),
+        beam_max_expansions=int(raw.get("beam_max_expansions", 32)),
+        recent_source_window=int(raw.get("recent_source_window", 2)),
+        recent_environment_window=int(raw.get("recent_environment_window", 2)),
+        baseline_music_max_shift=float(raw.get("baseline_music_max_shift", 0.5)),
+        audio_overlap_ms=tuple(int(v) for v in raw.get("audio_overlap_ms", [100, 250])),
+        impact_tail_max_ms=int(raw.get("impact_tail_max_ms", 400)),
+        v2_weights=v2_weights,
+        beam_weights=beam_weights,
+        penalty_weights=penalty_weights,
+        roi_profile=dict(raw.get("roi_profile") or {}),
         weights=weights,
         fast_montage_target=target,
         full_highlight_target=float(raw.get("full_highlight_target", 230.0)),
@@ -135,7 +248,9 @@ def ensure_runtime_dirs(config: PipelineConfig) -> None:
         config.output_dir,
         config.analysis_dir,
         config.music_analysis_dir,
+        config.music_v2_analysis_dir,
         config.preview_analysis_dir,
+        config.preview_v2_analysis_dir,
         config.proxy_dir,
         config.cache_dir,
         config.highlights_dir,

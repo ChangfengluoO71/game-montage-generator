@@ -24,6 +24,52 @@ target_fps: 60.0
 preview_min_duration: 45.0
 preview_max_duration: 60.0
 preview_preferred_shot_max_duration: 20.0
+baseline_music_in: 19.0
+baseline_music_out: 74.252
+v2_output_name: preview_60s_v2.mp4
+payoff_analysis_fps: 6.0
+event_merge_window_ms: 700
+strong_anchor_threshold: 0.75
+weak_anchor_threshold: 0.55
+max_anchor_count_per_candidate: 3
+preferred_macro_duration: [2.0, 10.0]
+hero_max_duration: 12.0
+beam_width: 16
+beam_max_expansions: 32
+recent_source_window: 2
+recent_environment_window: 2
+baseline_music_max_shift: 0.5
+audio_overlap_ms: [100, 250]
+impact_tail_max_ms: 400
+v2_weights:
+  payoff_score: 0.25
+  human_selection_prior: 0.15
+  combat_intensity: 0.12
+  action_density: 0.12
+  continuity: 0.10
+  visual_novelty: 0.08
+  motion: 0.06
+  audio_activity: 0.05
+  danger_score: 0.04
+  uniqueness: 0.03
+beam_weights:
+  highlight_quality: 0.35
+  music_fit: 0.25
+  transition_compatibility: 0.15
+  diversity: 0.15
+  energy_curve_fit: 0.10
+penalty_weights:
+  stationary_ads: 1.0
+  downtime: 1.0
+  no_payoff: 1.0
+  repetitive_fire: 1.0
+roi_profile:
+  version: 1
+  reward_score: [0.0, 0.0, 1.0, 1.0]
+  kill_feed: [0.0, 0.0, 1.0, 0.2]
+  crosshair: [0.4, 0.25, 0.6, 0.75]
+  objective: [0.0, 0.0, 1.0, 0.25]
+  damage_border: [0.0, 0.0, 1.0, 1.0]
 
 weights:
   human_selection_prior: 0.30

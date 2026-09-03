@@ -30,6 +30,41 @@ def cache_key(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def v2_cache_key(
+    source_fingerprint: dict[str, object],
+    stage: str,
+    parameters: dict[str, object],
+) -> str:
+    payload = {
+        "source_fingerprint": source_fingerprint,
+        "stage": stage,
+        "stage_version": parameters.get("stage_version", "v2"),
+        "ffmpeg_version": parameters.get("ffmpeg_version", parameters.get("selected_ffmpeg_version", "unknown")),
+        "parameters": parameters,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def baseline_manifest(path: Path) -> dict[str, object]:
+    resolved = path.resolve(strict=True)
+    stat = resolved.stat()
+    digest = hashlib.sha256()
+    with resolved.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"path": str(resolved), "size": stat.st_size, "mtime": stat.st_mtime, "sha256": digest.hexdigest()}
+
+
+def assert_baseline_unchanged(before: dict[str, object], path: Path) -> None:
+    try:
+        after = baseline_manifest(path)
+    except (OSError, FileNotFoundError) as exc:
+        raise RuntimeError(f"baseline is missing or unreadable: {path}") from exc
+    if after != before:
+        raise RuntimeError(f"baseline changed: expected {before}, got {after}")
+
+
 def atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
