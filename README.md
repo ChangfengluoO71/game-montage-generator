@@ -31,6 +31,20 @@ D:\miniconda\python.exe main.py render-preview
 D:\miniconda\python.exe main.py verify-preview
 ```
 
+## V2 editorial optimization
+
+V2 analysis is versioned below `work\analysis\preview` and stops before media rendering:
+
+```powershell
+D:\miniconda\python.exe main.py all-v2 --dry-run
+D:\miniconda\python.exe main.py render-preview-v2
+D:\miniconda\python.exe main.py verify-preview-v2
+```
+
+The V2 render gate requires the V2 EDL, sync report, and timeline plot. It writes only
+`output\preview_60s_v2.mp4`; the V1 `preview_60s.mp4` baseline and `raw` inputs are
+immutable. `render-fast` and `render-full` remain blocked.
+
 也可以用 `python main.py all` 一次完成分析和 Preview 渲染，但仍不会生成完整成片。`render-fast` 和 `render-full` 在人工批准 Preview 前固定返回非零状态并停止。
 
 ## 安全边界

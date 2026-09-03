@@ -171,6 +171,14 @@ class PipelineConfig:
         return self.preview_v2_analysis_dir / "preview_v2_timeline.png"
 
     @property
+    def environment_v2_path(self) -> Path:
+        return self.analysis_dir / "environment_v2.json"
+
+    @property
+    def baseline_manifest_v2_path(self) -> Path:
+        return self.analysis_dir / "baseline_manifest_v2.json"
+
+    @property
     def preview_analysis_dir(self) -> Path:
         return self.analysis_dir / "preview"
 

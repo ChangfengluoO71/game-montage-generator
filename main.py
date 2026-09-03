@@ -18,7 +18,9 @@ from typing import Any
 import soundfile as sf
 
 from montage.cache import (
+    assert_baseline_unchanged,
     atomic_write_json,
+    baseline_manifest,
     cache_key,
     file_fingerprint,
     read_cached_json,
@@ -29,8 +31,10 @@ from montage.config import PipelineConfig, ensure_runtime_dirs, load_config
 from montage.dedupe import deduplicate_candidates, fingerprint_candidate
 from montage.ffmpeg_renderer import probe_output, render_edit
 from montage.media_index import build_media_index, write_media_index
-from montage.models import Candidate, DedupeResult, EditDecisionList, EditShot, MediaRecord, MusicAnalysis, VideoAnalysis
-from montage.music_analysis import analyze_music
+from montage.models import (Candidate, CandidateVariant, DedupeResult, EditDecisionList, EditShot,
+                            MediaRecord, MusicAnalysis, PayoffEvent, SourceSegment, V2EditDecisionList,
+                            V2EditShot, VideoAnalysis)
+from montage.music_analysis import analyze_music, analyze_music_v2
 from montage.proxy import build_proxy
 from montage.ranking import score_candidates
 from montage.review import render_review_assets
@@ -38,6 +42,14 @@ from montage.toolchain import Toolchain, discover_toolchain, run_command
 from montage.timeline import build_preview_edit, write_edit_list
 from montage.video_analysis import write_video_analysis, analyze_video_activity
 from montage.audio_analysis import analyze_audio_waveform, extract_analysis_audio
+from montage.condense import build_condensed_variants
+from montage.dedupe import deduplicate_variants, fingerprint_variant, write_v2_dedupe_summary
+from montage.beam_timeline import build_v2_preview_edit, validate_v2_edit
+from montage.payoff_detection import detect_payoff_events, ocr_available, write_payoff_events
+from montage.candidate import write_v2_candidates
+from montage.timeline_visualization import render_v2_timeline_plot
+from montage.v2_report import build_v2_sync_report, render_v2_markdown_report, write_v2_report
+from montage.v2_renderer import render_v2_edit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -54,6 +66,21 @@ class PipelineState:
     candidates: list[Candidate] | None = None
     dedupe: DedupeResult | None = None
     edit: EditDecisionList | None = None
+
+
+@dataclass
+class V2PipelineState:
+    config: PipelineConfig
+    toolchain: Toolchain
+    baseline_manifest: dict[str, object]
+    music: MusicAnalysis
+    music_window: Any
+    payoff_events: list[PayoffEvent]
+    variants: list[CandidateVariant]
+    dedupe: Any
+    edit: V2EditDecisionList
+    sync_report: dict[str, object]
+    rejected: dict[str, int]
 
 
 def _logger(config: PipelineConfig) -> logging.Logger:
@@ -201,6 +228,235 @@ def _edit_from_dict(data: dict[str, Any]) -> EditDecisionList:
         music_reason=str(data.get("music_reason", "")),
         shots=shots,
     )
+
+
+def _event_from_dict(data: dict[str, Any]) -> PayoffEvent:
+    return PayoffEvent(str(data["event_id"]), str(data["type"]), float(data["source_time"]),
+                       float(data["confidence"]), float(data["strength"]), float(data.get("semantic_confidence", 0.0)),
+                       dict(data.get("evidence") or {}), tuple(data.get("detector_flags") or ()), int(data.get("merged_peak_count", 1)))
+
+
+def _segment_from_dict(data: dict[str, Any]) -> SourceSegment:
+    return SourceSegment(Path(data["source"]), float(data["source_in"]), float(data["source_out"]), float(data["duration"]))
+
+
+def _v2_shot_from_dict(data: dict[str, Any]) -> V2EditShot:
+    primary = _event_from_dict(data["primary_anchor"]) if data.get("primary_anchor") else None
+    return V2EditShot(
+        source=Path(data["source"]), source_in=float(data["source_in"]), source_out=float(data["source_out"]),
+        duration=float(data["duration"]), candidate_score=float(data.get("candidate_score", 0.0)),
+        duplicate_group=data.get("duplicate_group"), timeline_in=float(data["timeline_in"]),
+        timeline_out=float(data["timeline_out"]), transition=str(data.get("transition", "hard_cut")),
+        music_target=data.get("music_target"), music_event_type=data.get("music_event_type"),
+        sync_offset=float(data.get("sync_offset", 0.0)), rationale=str(data.get("rationale", "")),
+        section=str(data.get("section", "")), source_duration=data.get("source_duration"),
+        source_segments=tuple(_segment_from_dict(item) for item in data.get("source_segments", [])),
+        parent_candidate_id=str(data.get("parent_candidate_id", "")), variant_id=str(data.get("variant_id", "")),
+        payoff_events=tuple(_event_from_dict(item) for item in data.get("payoff_events", [])),
+        anchor_event_time=data.get("anchor_event_time"), anchor_event_type=data.get("anchor_event_type"),
+        anchor_event_strength=data.get("anchor_event_strength"), anchor_event_confidence=data.get("anchor_event_confidence"),
+        primary_anchor=primary, secondary_anchors=tuple(_event_from_dict(item) for item in data.get("secondary_anchors", [])),
+        context_integrity_score=float(data.get("context_integrity_score", 1.0)), condense_reason=str(data.get("condense_reason", "")),
+        event_timeline=data.get("event_timeline"), event_sync_offset=float(data.get("event_sync_offset", 0.0)),
+        cut_sync_offset=float(data.get("cut_sync_offset", 0.0)), transition_compatibility_score=float(data.get("transition_compatibility_score", 1.0)),
+        impact_cut=bool(data.get("impact_cut", False)), audio_j_cut_ms=int(data.get("audio_j_cut_ms", 0)),
+        audio_l_cut_ms=int(data.get("audio_l_cut_ms", 0)), source_signature=str(data.get("source_signature", "")),
+        environment_signature=str(data.get("environment_signature", "")), weapon_or_view_signature=str(data.get("weapon_or_view_signature", "")),
+    )
+
+
+def _v2_edit_from_dict(data: dict[str, Any]) -> V2EditDecisionList:
+    return V2EditDecisionList(str(data.get("kind", "preview_v2")), Path(data["music_source"]),
+                              float(data["baseline_music_in"]), float(data["baseline_music_out"]),
+                              float(data["music_in"]), float(data["music_out"]), float(data["duration"]),
+                              str(data.get("music_reason", "")), tuple(_v2_shot_from_dict(item) for item in data.get("shots", [])))
+
+
+def _load_v2_music(config: PipelineConfig) -> MusicAnalysis:
+    payload = json.loads(config.music_v2_cache_path.read_text(encoding="utf-8"))
+    data = payload.get("data", payload)
+    data = data.get("analysis", data)
+    return _load_music_payload(data)
+
+
+def _load_music_payload(data: dict[str, Any]) -> MusicAnalysis:
+    return MusicAnalysis(Path(data["source_file"]), float(data["duration"]), float(data["tempo"]),
+        [float(v) for v in data.get("beats", [])], [float(v) for v in data.get("strong_beats", [])],
+        [float(v) for v in data.get("bars", [])], [float(v) for v in data.get("onsets", [])], list(data.get("edit_points", [])),
+        [float(v) for v in data.get("energy_times", [])], [float(v) for v in data.get("rms", [])],
+        [float(v) for v in data.get("onset_strength", [])], [float(v) for v in data.get("novelty", [])],
+        list(data.get("structure_regions", [])), {str(k): float(v) for k, v in (data.get("confidence") or {}).items()},
+        data.get("preview_music_in"), data.get("preview_music_out"), str(data.get("preview_reason", "")))
+
+
+def _variant_from_dict(data: dict[str, Any]) -> CandidateVariant:
+    primary = _event_from_dict(data["primary_anchor"]) if data.get("primary_anchor") else None
+    return CandidateVariant(
+        variant_id=str(data["variant_id"]), parent_candidate_id=str(data.get("parent_candidate_id", "")),
+        source_file=Path(data["source_file"]), source_segments=tuple(_segment_from_dict(item) for item in data["source_segments"]),
+        duration=float(data["duration"]), human_selection_prior=float(data.get("human_selection_prior", 0.0)),
+        payoff_score=float(data.get("payoff_score", 0.0)), combat_intensity=float(data.get("combat_intensity", 0.0)),
+        action_density=float(data.get("action_density", 0.0)), continuity=float(data.get("continuity", 0.0)),
+        visual_novelty=float(data.get("visual_novelty", 0.0)), motion=float(data.get("motion", 0.0)),
+        audio_activity=float(data.get("audio_activity", 0.0)), danger_score=float(data.get("danger_score", 0.0)),
+        uniqueness=float(data.get("uniqueness", 1.0)), final_score=float(data.get("final_score", 0.0)),
+        duplicate_group=data.get("duplicate_group"), payoff_events=tuple(_event_from_dict(item) for item in data.get("payoff_events", [])),
+        primary_anchor=primary, secondary_anchors=tuple(_event_from_dict(item) for item in data.get("secondary_anchors", [])),
+        anchor_event_time=data.get("anchor_event_time"), anchor_event_type=data.get("anchor_event_type"),
+        anchor_event_strength=data.get("anchor_event_strength"), anchor_event_confidence=data.get("anchor_event_confidence"),
+        context_integrity_score=float(data.get("context_integrity_score", 1.0)), penalty_values=dict(data.get("penalty_values", {})),
+        source_signature=str(data.get("source_signature", "")), environment_signature=str(data.get("environment_signature", "")),
+        weapon_or_view_signature=str(data.get("weapon_or_view_signature", "")), condense_reason=str(data.get("condense_reason", "")),
+        rationale=str(data.get("rationale", "")), score_components=dict(data.get("score_components", {})),
+        rapid_multikill_score=float(data.get("rapid_multikill_score", 0.0)), rapid_multikill_bonus=float(data.get("rapid_multikill_bonus", 0.0)),
+    )
+
+
+def _load_v2_variants(config: PipelineConfig) -> list[CandidateVariant]:
+    path = config.highlight_candidates_v2_path
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = payload.get("variants", payload.get("candidates", payload)) if isinstance(payload, dict) else payload
+    return [_variant_from_dict(row) for row in rows]
+
+
+def _write_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
+    atomic_write_json(config.preview_v2_edit_path, edit.to_dict())
+    config.preview_v2_timeline_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{i + 1:02d} {shot.timeline_in:.3f}-{shot.timeline_out:.3f} {shot.source} "
+             f"anchor={shot.anchor_event_type or 'none'} event_offset={shot.event_sync_offset:.3f}"
+             for i, shot in enumerate(edit.shots)]
+    config.preview_v2_timeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
+    """Run V2 analysis and artifact generation only; never calls a renderer."""
+    ensure_runtime_dirs(config)
+    logger = _logger(config)
+    raw_before = _raw_manifest(config)
+    atomic_write_json(config.analysis_dir / "raw_manifest_v2_before.json", raw_before)
+    toolchain = discover_toolchain(config)
+    write_environment_report(toolchain, config, config.environment_v2_path)
+    logger.info("V2 thresholds strong=%.3f weak=%.3f merge=%dms beam_width=%d", config.strong_anchor_threshold,
+                config.weak_anchor_threshold, config.event_merge_window_ms, config.beam_width)
+    logger.info("V2 OCR available=%s encoder=%s output=%s stop_rule=preview-only", ocr_available(),
+                config.nvenc.get("video_encoder", "h264_nvenc"), config.v2_output_path)
+    if not config.baseline_output_path.exists():
+        raise FileNotFoundError(f"immutable V1 baseline is missing: {config.baseline_output_path}")
+    manifest = baseline_manifest(config.baseline_output_path)
+    atomic_write_json(config.baseline_manifest_v2_path, manifest)
+    baseline, _ = _load_edit_and_music(config)
+    music, window = analyze_music_v2(config, toolchain, baseline)
+    logger.info("V2 music range %.3f-%.3f (baseline %.3f-%.3f)", window.v2_music_in, window.v2_music_out,
+                window.baseline_music_in, window.baseline_music_out)
+    variants = _load_v2_variants(config)
+    logger.info("V2 cache %s; candidate cache %s", "hit" if config.music_v2_cache_path.exists() else "miss",
+                "hit" if config.highlight_candidates_v2_path.exists() else "miss")
+    events: list[PayoffEvent] = []
+    rejected: dict[str, int] = {}
+    if not variants:
+        candidates_path = config.analysis_dir / "highlight_candidates.json"
+        if candidates_path.exists():
+            rows = json.loads(candidates_path.read_text(encoding="utf-8")).get("candidates", [])
+            candidates = [_candidate_from_dict(row) for row in rows]
+            analyses = {}
+            for analysis_path in config.analysis_dir.glob("video_*.json"):
+                try:
+                    analysis = _video_from_dict(json.loads(analysis_path.read_text(encoding="utf-8")))
+                    analyses[str(analysis.source_file)] = analysis
+                except (KeyError, TypeError, ValueError):
+                    continue
+            for candidate in candidates:
+                analysis = analyses.get(str(candidate.source_file))
+                if analysis is None:
+                    continue
+                found = detect_payoff_events(candidate.source_file, candidate.source_start, candidate.source_end,
+                                             analysis, {}, config, toolchain)
+                events.extend(found)
+                variants.extend(build_condensed_variants(candidate, found, music, config))
+            if variants:
+                fingerprints = {variant.variant_id: fingerprint_variant(variant, variant.source_file, toolchain, config)
+                                for variant in variants}
+                dedupe = deduplicate_variants(variants, fingerprints, config.dedupe_threshold)
+                variants = [group[0] for group in dedupe.groups]
+                write_v2_candidates(variants, config.highlight_candidates_v2_path,
+                                    config.highlight_candidates_v2_csv_path, config=config)
+                write_v2_dedupe_summary(dedupe, config.dedupe_summary_v2_path)
+            else:
+                dedupe = None
+        else:
+            dedupe = None
+    else:
+        dedupe = None
+    write_payoff_events(events, config.payoff_events_v2_path)
+    if not variants:
+        raise RuntimeError("V2 candidate variants are unavailable; run V1 analysis artifacts first")
+    edit = build_v2_preview_edit(variants, music, baseline, config)
+    validate_v2_edit(edit, config)
+    _write_v2_edit(edit, config)
+    report = build_v2_sync_report(edit, baseline, variants, rejected)
+    write_v2_report(report, config.preview_v2_sync_report_path)
+    render_v2_timeline_plot(edit, music, config.preview_v2_timeline_image_path)
+    raw_after = _raw_manifest(config)
+    if raw_before != raw_after:
+        raise RuntimeError("RAW manifest changed during V2 analysis")
+    assert_baseline_unchanged(manifest, config.baseline_output_path)
+    atomic_write_json(config.analysis_dir / "raw_manifest_v2_after.json", raw_after)
+    logger.info("V2 analysis complete; render stop rule active; output=%s", config.v2_output_path)
+    return V2PipelineState(config, toolchain, manifest, music, window, events, variants, dedupe, edit, report, rejected)
+
+
+def render_preview_v2_stage(config: PipelineConfig, state: V2PipelineState | None = None) -> Path:
+    required = (config.preview_v2_edit_path, config.preview_v2_sync_report_path, config.preview_v2_timeline_image_path)
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise RuntimeError("V2 render gate failed; missing: " + ", ".join(missing))
+    toolchain = state.toolchain if state is not None else discover_toolchain(config)
+    before_path = config.baseline_manifest_v2_path
+    before = json.loads(before_path.read_text(encoding="utf-8")) if before_path.exists() else baseline_manifest(config.baseline_output_path)
+    edit = _v2_edit_from_dict(json.loads(config.preview_v2_edit_path.read_text(encoding="utf-8")))
+    output = config.v2_output_path
+    rendered = render_v2_edit(edit, config, toolchain, output)
+    assert_baseline_unchanged(before, config.baseline_output_path)
+    render_v2_markdown_report(json.loads(config.preview_v2_sync_report_path.read_text(encoding="utf-8")),
+                              config.preview_v2_report_path, toolchain=toolchain, output=rendered)
+    return rendered
+
+
+def verify_preview_v2(config: PipelineConfig) -> int:
+    required = (config.preview_v2_edit_path, config.preview_v2_sync_report_path, config.preview_v2_timeline_image_path,
+                config.v2_output_path)
+    if any(not path.exists() for path in required):
+        return 1
+    try:
+        toolchain = discover_toolchain(config)
+        edit = _v2_edit_from_dict(json.loads(config.preview_v2_edit_path.read_text(encoding="utf-8")))
+        validate_v2_edit(edit, config)
+        probe = probe_output(config.v2_output_path, toolchain)
+        decode = run_command([toolchain.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", config.v2_output_path,
+                              "-map", "0", "-f", "null", "NUL"], check=False)
+        baseline = json.loads(config.baseline_manifest_v2_path.read_text(encoding="utf-8"))
+        assert_baseline_unchanged(baseline, config.baseline_output_path)
+        full_outputs = [config.output_dir / "fast_montage.mp4", config.output_dir / "full_highlights.mp4"]
+        shot_groups = [shot.duplicate_group for shot in edit.shots if shot.duplicate_group]
+        ranges_valid = all(shot.source_in >= 0 and shot.source_out > shot.source_in and shot.duration > 0 for shot in edit.shots)
+        integrity_valid = all(shot.context_integrity_score >= config.minimum_context_integrity for shot in edit.shots)
+        dedupe_valid = len(shot_groups) == len(set(shot_groups))
+        cadence_valid = abs(float(probe.get("fps", 0.0)) - config.target_fps) <= max(0.5, config.target_fps * 0.02)
+        valid = bool(probe.get("has_video") and probe.get("has_audio") and int(probe.get("width", 0)) == config.output_width
+                     and int(probe.get("height", 0)) == config.output_height and 45.0 <= float(probe.get("duration", 0.0)) <= 60.0
+                     and cadence_valid and ranges_valid and integrity_valid and dedupe_valid
+                     and decode.returncode == 0 and not any(path.exists() for path in full_outputs))
+        print(json.dumps({"valid": valid, "probe": probe, "decode_returncode": decode.returncode,
+                          "checks": {"cadence": cadence_valid, "ranges": ranges_valid,
+                                     "dedupe": dedupe_valid, "integrity": integrity_valid,
+                                     "full_outputs_absent": not any(path.exists() for path in full_outputs)}},
+                         ensure_ascii=False, indent=2))
+        return 0 if valid else 1
+    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(json.dumps({"valid": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 1
 
 
 def _p95(values: list[float]) -> float:
@@ -514,10 +770,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Battlefield gameplay-aware highlight montage pipeline")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("index", "analyze-video", "analyze-music", "candidates", "review", "render-preview", "render-fast", "render-full", "verify-preview"):
+    for command in ("index", "analyze-video", "analyze-music", "candidates", "review", "render-preview", "render-fast", "render-full", "verify-preview", "render-preview-v2", "verify-preview-v2"):
         subparsers.add_parser(command)
     all_parser = subparsers.add_parser("all")
     all_parser.add_argument("--dry-run", action="store_true", help="run analysis and EDL generation without rendering video")
+    all_v2_parser = subparsers.add_parser("all-v2")
+    all_v2_parser.add_argument("--dry-run", action="store_true", help="run V2 analysis and EDL generation without rendering video")
     return parser
 
 
@@ -528,8 +786,19 @@ def run_pipeline(command: str, config_path: Path, dry_run: bool = False) -> int:
     config = load_config(Path(config_path))
     if command == "verify-preview":
         return _verify_preview(config)
+    if command == "verify-preview-v2":
+        return verify_preview_v2(config)
     if command == "render-preview":
         render_preview_stage(config)
+        return 0
+    if command == "render-preview-v2":
+        render_preview_v2_stage(config)
+        return 0
+    if command == "all-v2":
+        v2_state = run_v2_analysis_pipeline(config)
+        if dry_run:
+            return 0
+        render_preview_v2_stage(config, v2_state)
         return 0
     if command == "all":
         state = _run_analysis_pipeline(config)
