@@ -2,8 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from montage.cache import assert_baseline_unchanged, baseline_manifest
-from montage.models import PayoffEvent, SourceSegment, V2EditShot
+from dataclasses import replace
+
+from montage.cache import assert_baseline_unchanged, baseline_manifest, v2_cache_key
+from montage.models import CandidateVariant, PayoffEvent, SourceSegment, V2EditShot
 
 
 def make_event(event_id: str, source_time: float) -> PayoffEvent:
@@ -81,3 +83,37 @@ def test_baseline_guard_detects_change(tmp_path):
     path.write_bytes(b"changed")
     with pytest.raises(RuntimeError, match="baseline"):
         assert_baseline_unchanged(before, path)
+
+
+def test_v2_output_rejects_baseline_collision_and_escape(base_config):
+    with pytest.raises(ValueError, match="baseline"):
+        replace(base_config, v2_output_name="preview_60s.mp4").v2_output_path
+    with pytest.raises(ValueError, match="output_dir"):
+        replace(base_config, v2_output_name="../outside.mp4").v2_output_path
+
+
+def test_v2_cache_key_requires_recorded_ffmpeg_version():
+    with pytest.raises(ValueError, match="FFmpeg version"):
+        v2_cache_key({"absolute_path": "C:/clip.mp4"}, "payoff_events", {})
+
+
+def test_v2_contract_mappings_are_immutable(tmp_path):
+    event = make_event("e1", 2.0)
+    with pytest.raises(TypeError):
+        event.evidence["motion_peak"] = 0.1
+
+    segment = SourceSegment(tmp_path / "clip.mp4", 1.0, 3.0, 2.0)
+    variant = CandidateVariant(
+        variant_id="variant-1", parent_candidate_id="candidate-1", source_file=segment.source,
+        source_segments=(segment,), duration=2.0, human_selection_prior=0.8, payoff_score=0.8,
+        combat_intensity=0.8, action_density=0.8, continuity=0.8, visual_novelty=0.8,
+        motion=0.8, audio_activity=0.8, danger_score=0.8, uniqueness=1.0, final_score=0.8,
+        duplicate_group=None, payoff_events=(event,), primary_anchor=event, secondary_anchors=(),
+        anchor_event_time=2.0, anchor_event_type="combat_climax", anchor_event_strength=0.88,
+        anchor_event_confidence=0.84, context_integrity_score=1.0,
+        penalty_values={"downtime": 0.0}, source_signature="source", environment_signature="env",
+        weapon_or_view_signature="view", condense_reason="", rationale="test",
+    )
+    with pytest.raises(TypeError):
+        variant.penalty_values["downtime"] = 1.0
+    assert variant.to_dict()["penalty_values"] == {"downtime": 0.0}

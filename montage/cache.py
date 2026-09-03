@@ -35,11 +35,14 @@ def v2_cache_key(
     stage: str,
     parameters: dict[str, object],
 ) -> str:
+    ffmpeg_version = parameters.get("ffmpeg_version")
+    if not isinstance(ffmpeg_version, str) or not ffmpeg_version.strip() or ffmpeg_version.strip().lower() == "unknown":
+        raise ValueError("recorded runtime-tested FFmpeg version is required for V2 cache keys")
     payload = {
         "source_fingerprint": source_fingerprint,
         "stage": stage,
         "stage_version": parameters.get("stage_version", "v2"),
-        "ffmpeg_version": parameters.get("ffmpeg_version", parameters.get("selected_ffmpeg_version", "unknown")),
+        "ffmpeg_version": ffmpeg_version,
         "parameters": parameters,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

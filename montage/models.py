@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value.resolve(strict=False))
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
@@ -19,7 +20,7 @@ def _json_value(value: Any) -> Any:
 
 class Serializable:
     def to_dict(self) -> dict[str, Any]:
-        return _json_value(asdict(self))
+        return {field.name: _json_value(getattr(self, field.name)) for field in fields(self)}
 
 
 @dataclass
@@ -154,6 +155,9 @@ class PayoffEvent(Serializable):
     detector_flags: tuple[str, ...] = ()
     merged_peak_count: int = 1
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "evidence", MappingProxyType(dict(self.evidence)))
+
 
 @dataclass(frozen=True)
 class SourceSegment(Serializable):
@@ -204,6 +208,7 @@ class CandidateVariant(Serializable):
     def __post_init__(self) -> None:
         if not self.source_segments:
             raise ValueError("candidate variant requires at least one source segment")
+        object.__setattr__(self, "penalty_values", MappingProxyType(dict(self.penalty_values)))
 
 
 @dataclass(frozen=True)
