@@ -55,7 +55,7 @@ def describe_variant_boundary(
             }
     if not values:
         values = {"motion_strength": 0.5, "luminance": 0.5, "visual_tone": 0.5, "impact_strength": 0.0}
-    direction = "forward" if variant.motion >= 0.55 else "neutral"
+    direction = "forward" if analysis is not None and analysis.times and variant.motion >= 0.55 else "neutral"
     ads = "ads" if variant.weapon_or_view_signature.lower() in {"ads", "aim", "scoped"} else "unknown"
     return BoundaryDescriptor(
         motion_direction=direction,
