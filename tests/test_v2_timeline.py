@@ -218,7 +218,7 @@ def baseline_edit_for_timeline() -> EditDecisionList:
 
 
 def test_v2_beam_builds_bounded_payoff_aware_edit(tmp_path, base_config):
-    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", beam_max_expansions=1000)
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
     variants = [timeline_variant(tmp_path, index) for index in range(10)]
 
     edit = build_v2_preview_edit(variants, music(), baseline_edit_for_timeline(), config)

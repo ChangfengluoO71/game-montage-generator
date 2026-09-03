@@ -259,7 +259,7 @@ def load_config(path: Path) -> PipelineConfig:
         preferred_macro_duration=tuple(float(v) for v in raw.get("preferred_macro_duration", [2.0, 10.0])),
         hero_max_duration=float(raw.get("hero_max_duration", 12.0)),
         beam_width=int(raw.get("beam_width", 16)),
-        beam_max_expansions=int(raw.get("beam_max_expansions", 32)),
+        beam_max_expansions=int(raw.get("beam_max_expansions", 8192)),
         recent_source_window=int(raw.get("recent_source_window", 2)),
         recent_environment_window=int(raw.get("recent_environment_window", 2)),
         baseline_music_max_shift=float(raw.get("baseline_music_max_shift", 0.5)),

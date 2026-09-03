@@ -5,6 +5,7 @@ from pathlib import Path
 import main
 from montage.models import (
     Candidate,
+    CandidateVariant,
     EditDecisionList,
     EditShot,
     MusicAnalysis,
@@ -44,6 +45,39 @@ def _v2_edit(tmp_path: Path) -> V2EditDecisionList:
 
 def _baseline() -> EditDecisionList:
     return EditDecisionList("preview", Path("music.wav"), 19.0, 74.252, 55.252, "locked", [])
+
+
+def _unscored_rapid_variant(tmp_path: Path) -> CandidateVariant:
+    source = tmp_path / "raw" / "rapid.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.touch()
+    events = (
+        _event("kill-1", "kill", 2.0, 0.9),
+        _event("kill-2", "kill", 5.0, 0.9),
+    )
+    segment = SourceSegment(source, 0.0, 6.0, 6.0)
+    return CandidateVariant(
+        variant_id="rapid-variant", parent_candidate_id="candidate-1", source_file=source,
+        source_segments=(segment,), duration=6.0, human_selection_prior=0.8, payoff_score=0.9,
+        combat_intensity=0.8, action_density=0.8, continuity=0.9, visual_novelty=0.7,
+        motion=0.8, audio_activity=0.8, danger_score=0.7, uniqueness=0.9, final_score=0.0,
+        duplicate_group="rapid-group", payoff_events=events, primary_anchor=events[-1],
+        secondary_anchors=(events[0],), anchor_event_time=events[-1].source_time,
+        anchor_event_type=events[-1].type, anchor_event_strength=events[-1].strength,
+        anchor_event_confidence=events[-1].confidence, context_integrity_score=1.0,
+        penalty_values={}, source_signature="rapid-source", environment_signature="rapid-map",
+        weapon_or_view_signature="rifle", condense_reason="",
+        rationale="rapid consecutive kills retain the complete action",
+    )
+
+
+def _scored_cache_row(config) -> dict[str, object]:
+    components = {name: 0.0 for name in config.v2_weights}
+    components.update({"rapid_multikill_score": 0.0, "rapid_multikill_bonus": 0.0})
+    return {
+        "variant_id": "cached", "final_score": 0.5, "score_components": components,
+        "rapid_multikill_score": 0.0, "rapid_multikill_bonus": 0.0,
+    }
 
 
 def _music() -> MusicAnalysis:
@@ -104,12 +138,37 @@ def test_stale_event_artifact_is_not_a_valid_variant_cache_hit(tmp_path):
     assert main._v2_artifact_cache_hit(config, "new-inputs") is False
 
 
+def test_current_key_unscored_v2_artifact_is_not_a_cache_hit(tmp_path, fake_toolchain):
+    config = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"), work_dir=tmp_path)
+    config.analysis_dir.mkdir(parents=True, exist_ok=True)
+    key = main._v2_artifact_cache_key(config, fake_toolchain)
+    config.highlight_candidates_v2_path.write_text(
+        json.dumps({
+            "cache_key": key,
+            "candidates": [{
+                "variant_id": "stale-zero-score",
+                "final_score": 0.0,
+                "score_components": {},
+                "rapid_multikill_score": 0.0,
+                "rapid_multikill_bonus": 0.0,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    config.payoff_events_v2_path.write_text(
+        json.dumps({"cache_key": key, "events": [], "event_count": 0}), encoding="utf-8"
+    )
+    config.dedupe_summary_v2_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
+
+    assert main._v2_artifact_cache_hit(config, key) is False
+
+
 def test_detector_input_changes_invalidate_cached_v2_events_and_variants(tmp_path, fake_toolchain):
     base = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"), work_dir=tmp_path)
     base.analysis_dir.mkdir(parents=True, exist_ok=True)
     base_key = main._v2_artifact_cache_key(base, fake_toolchain)
     base.highlight_candidates_v2_path.write_text(
-        json.dumps({"cache_key": base_key, "candidates": [{"variant_id": "cached"}]}), encoding="utf-8"
+        json.dumps({"cache_key": base_key, "candidates": [_scored_cache_row(base)]}), encoding="utf-8"
     )
     base.payoff_events_v2_path.write_text(
         json.dumps({"cache_key": base_key, "events": [], "event_count": 0}), encoding="utf-8"
@@ -124,6 +183,21 @@ def test_detector_input_changes_invalidate_cached_v2_events_and_variants(tmp_pat
     )
     assert all(main._v2_artifact_cache_key(config, fake_toolchain) != base_key for config in mutations)
     assert all(not main._v2_artifact_cache_hit(config, main._v2_artifact_cache_key(config, fake_toolchain)) for config in mutations)
+
+
+def test_v2_orchestration_scores_condensed_variants_and_rapid_multikill(tmp_path):
+    config = replace(
+        main.load_config(Path(__file__).parents[1] / "config.yaml"),
+        raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", output_dir=tmp_path / "output",
+    )
+
+    scored = main._score_v2_variants([_unscored_rapid_variant(tmp_path)], config)[0]
+
+    assert scored.final_score > 0.0
+    assert scored.score_components
+    assert scored.rapid_multikill_score == 1.0
+    assert scored.rapid_multikill_bonus == config.rapid_multikill_bonus_weight
+    assert scored.score_components["rapid_multikill_bonus"] == config.rapid_multikill_bonus_weight
 
 
 def test_plot_is_created_below_work(tmp_path):

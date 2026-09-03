@@ -37,7 +37,7 @@ from montage.models import (Candidate, CandidateVariant, DedupeResult, EditDecis
                             V2EditShot, VideoAnalysis)
 from montage.music_analysis import analyze_music, analyze_music_v2
 from montage.proxy import build_proxy
-from montage.ranking import score_candidates
+from montage.ranking import score_candidates, score_variant
 from montage.review import render_review_assets
 from montage.toolchain import Toolchain, discover_toolchain, run_command
 from montage.timeline import build_preview_edit, write_edit_list
@@ -322,6 +322,11 @@ def _load_v2_variants(config: PipelineConfig) -> list[CandidateVariant]:
     return [_variant_from_dict(row) for row in rows]
 
 
+def _score_v2_variants(variants: list[CandidateVariant], config: PipelineConfig) -> list[CandidateVariant]:
+    """Apply the auditable V1.1 score before V2 dedupe and beam selection."""
+    return [score_variant(variant, config) for variant in variants]
+
+
 def _load_cached_payoff_events(config: PipelineConfig) -> list[PayoffEvent]:
     if not config.payoff_events_v2_path.exists():
         return []
@@ -360,7 +365,7 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
         {"inputs": _v2_cache_inputs(config)},
         "v2_variants_and_events",
         {
-            "stage_version": "v2-aggregate-artifacts-2",
+            "stage_version": "v2-aggregate-artifacts-3",
             "ffmpeg_version": toolchain.ffmpeg_version,
             "detector_version": config.payoff_detector_version,
             "payoff_analysis_fps": config.payoff_analysis_fps,
@@ -391,6 +396,24 @@ def _v2_artifact_cache_hit(config: PipelineConfig, expected_key: str) -> bool:
         event_rows = events.get("events")
         if not isinstance(rows, list) or not rows or not isinstance(event_rows, list):
             return False
+        required_components = set(config.v2_weights) | {"rapid_multikill_score", "rapid_multikill_bonus"}
+        for row in rows:
+            if not isinstance(row, dict):
+                return False
+            components = row.get("score_components")
+            if not isinstance(components, dict) or not required_components.issubset(components):
+                return False
+            try:
+                values = [
+                    float(row["final_score"]),
+                    float(row["rapid_multikill_score"]),
+                    float(row["rapid_multikill_bonus"]),
+                    *(float(components[name]) for name in required_components),
+                ]
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not all(math.isfinite(value) for value in values):
+                return False
         if not config.dedupe_summary_v2_path.exists() or not isinstance(
             json.loads(config.dedupe_summary_v2_path.read_text(encoding="utf-8")), dict
         ):
@@ -490,7 +513,8 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
                 found = detect_payoff_events(candidate.source_file, candidate.source_start, candidate.source_end,
                                              analysis, audio_evidence, config, toolchain)
                 events.extend(found)
-                variants.extend(build_condensed_variants(candidate, found, music, config))
+                generated = build_condensed_variants(candidate, found, music, config)
+                variants.extend(_score_v2_variants(generated, config))
             if variants:
                 fingerprints = {variant.variant_id: fingerprint_variant(variant, variant.source_file, toolchain, config)
                                 for variant in variants}
