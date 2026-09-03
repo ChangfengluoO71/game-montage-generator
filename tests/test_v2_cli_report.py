@@ -104,6 +104,28 @@ def test_stale_event_artifact_is_not_a_valid_variant_cache_hit(tmp_path):
     assert main._v2_artifact_cache_hit(config, "new-inputs") is False
 
 
+def test_detector_input_changes_invalidate_cached_v2_events_and_variants(tmp_path, fake_toolchain):
+    base = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"), work_dir=tmp_path)
+    base.analysis_dir.mkdir(parents=True, exist_ok=True)
+    base_key = main._v2_artifact_cache_key(base, fake_toolchain)
+    base.highlight_candidates_v2_path.write_text(
+        json.dumps({"cache_key": base_key, "candidates": [{"variant_id": "cached"}]}), encoding="utf-8"
+    )
+    base.payoff_events_v2_path.write_text(
+        json.dumps({"cache_key": base_key, "events": [], "event_count": 0}), encoding="utf-8"
+    )
+    base.dedupe_summary_v2_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
+
+    assert main._v2_artifact_cache_hit(base, base_key) is True
+    mutations = (
+        replace(base, roi_profile={**base.roi_profile, "kill_feed": [0.67, 0.03, 0.99, 0.35]}),
+        replace(base, payoff_evidence_threshold=base.payoff_evidence_threshold + 0.01),
+        replace(base, long_clip_threshold=base.long_clip_threshold + 1.0),
+    )
+    assert all(main._v2_artifact_cache_key(config, fake_toolchain) != base_key for config in mutations)
+    assert all(not main._v2_artifact_cache_hit(config, main._v2_artifact_cache_key(config, fake_toolchain)) for config in mutations)
+
+
 def test_plot_is_created_below_work(tmp_path):
     path = tmp_path / "preview_v2_timeline.png"
     render_v2_timeline_plot(_v2_edit(tmp_path), _music(), path)

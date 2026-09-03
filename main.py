@@ -367,7 +367,13 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
             "event_merge_window_ms": config.event_merge_window_ms,
             "strong_anchor_threshold": config.strong_anchor_threshold,
             "weak_anchor_threshold": config.weak_anchor_threshold,
-            "roi_profile_version": config.roi_profile.get("version", 1),
+            "payoff_evidence_threshold": config.payoff_evidence_threshold,
+            "long_clip_threshold": config.long_clip_threshold,
+            "roi_profile": {
+                str(name): [float(value) for value in bounds]
+                if isinstance(bounds, (list, tuple)) else bounds
+                for name, bounds in sorted(config.roi_profile.items(), key=lambda item: str(item[0]))
+            },
         },
     )
 
