@@ -9,9 +9,9 @@
 
 ## Tests and results
 
-- `D:/miniconda/python.exe -m pytest -q tests/test_v2_renderer.py`: 13 passed after the review fix.
-- Focused regression suites: 94 passed.
-- `D:/miniconda/python.exe -m pytest -q`: 146 passed, 2 pre-existing `audioread` Python 3.13 deprecation warnings.
+- `D:/miniconda/python.exe -m pytest -q tests/test_v2_renderer.py`: 15 passed.
+- All V2 suites (`test_v2_*.py`): 83 passed, 2 pre-existing `audioread` Python 3.13 deprecation warnings.
+- `D:/miniconda/python.exe -m pytest -q`: 155 passed, 2 pre-existing `audioread` Python 3.13 deprecation warnings.
 - `D:/miniconda/python.exe -m compileall -q montage tests`: passed.
 - `git diff --check`: passed.
 
@@ -25,13 +25,14 @@ Each source segment is trimmed under `work/cache/render_v2/<unique-run>`, fitted
 
 ## Safety and media status
 
-EDL validation, source/range/path checks, RAW destination rejection, unique work-temporary output, nonzero-size verification, and V2-only replacement are enforced. The V1 baseline remains untouched. No RAW files, generated media, or real-media renders were changed or run.
+EDL validation, source/range/path checks, RAW destination rejection, unique work-temporary output, nonzero-size verification, strict selected-toolchain ffprobe/decode validation, and V2-only replacement are enforced. The V1 baseline remains untouched. No RAW files, generated media, or real-media renders were changed or run.
 
 ## Review fixes
 
 - Before any V2 segment render, every distinct EDL RAW source is preflighted with the selected toolchain `ffprobe`. Sources must be regular files below `raw`, contain video and audio streams, report a finite positive duration, and contain every requested `source_out` within the probed duration plus a 20 ms safety tolerance. A failed preflight stops before segment generation.
+- Before replacing the configured V2 output, the temporary final file is checked with the selected toolchain `ffprobe` for video/audio streams, configured 1920×1200 geometry, positive configured cadence, and EDL-matching duration within a 100 ms/two-frame tolerance; selected FFmpeg then performs a strict full video/audio decode with `-xerror`. Any failed check leaves the existing V2 output and baseline untouched.
 - `compile_v2_segment_argv` accepts only strict descendants of `work_dir`. `compile_v2_final_argv` accepts a strict `work_dir` descendant or exactly the configured V2 output path. Both public APIs reject RAW, the immutable baseline, the output directory itself, and arbitrary external destinations.
-- Added mocked-ffprobe and public-argv destination-policy regression coverage; removed the unused renderer cache import.
+- Added mocked-ffprobe/FFmpeg coverage for short-output rejection, existing-output preservation, valid-output acceptance, and public-argv destination policy; removed the unused renderer cache import.
 
 ## Commits
 

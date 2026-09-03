@@ -76,6 +76,81 @@ def _probe_source_duration(source: Path, toolchain: Toolchain) -> float:
     return duration
 
 
+def _parse_fps(value: object) -> float:
+    if not isinstance(value, str) or not value:
+        return 0.0
+    if "/" in value:
+        numerator, denominator = value.split("/", 1)
+        try:
+            return float(numerator) / float(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _validate_rendered_v2_output(
+    output: Path, edit: V2EditDecisionList, config: PipelineConfig, toolchain: Toolchain
+) -> None:
+    probe = run_command(
+        [
+            toolchain.ffprobe, "-hide_banner", "-loglevel", "error",
+            "-show_entries",
+            "stream=codec_type,width,height,avg_frame_rate:format=duration",
+            "-of", "json", str(output),
+        ],
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise ValueError(f"ffprobe rejected V2 output: {output}")
+    try:
+        payload = json.loads(probe.stdout or "")
+        streams = [stream for stream in payload.get("streams", []) if isinstance(stream, dict)]
+        video = next(stream for stream in streams if stream.get("codec_type") == "video")
+        audio = next(stream for stream in streams if stream.get("codec_type") == "audio")
+        actual_duration = float((payload.get("format") or {}).get("duration"))
+        width = int(video.get("width"))
+        height = int(video.get("height"))
+        fps = _parse_fps(video.get("avg_frame_rate"))
+    except (AttributeError, TypeError, ValueError, StopIteration, json.JSONDecodeError) as exc:
+        raise ValueError(f"V2 output probe is missing required media metadata: {output}") from exc
+
+    if not audio or width != config.output_width or height != config.output_height:
+        raise ValueError(
+            f"V2 output has invalid streams or geometry: {output} "
+            f"(width={width}, height={height}, has_audio={bool(audio)})"
+        )
+    if not math.isfinite(actual_duration) or actual_duration <= 0:
+        raise ValueError(f"V2 output probe has invalid duration: {output}")
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError(f"V2 output probe has invalid frame cadence: {output}")
+    expected_fps = float(config.target_fps)
+    if expected_fps > 0 and abs(fps - expected_fps) > max(0.5, expected_fps * 0.02):
+        raise ValueError(
+            f"V2 output frame cadence does not match the configured cadence: "
+            f"actual={fps:.3f}, expected={expected_fps:.3f}"
+        )
+    duration_tolerance = max(0.1, 2.0 / expected_fps) if expected_fps > 0 else 0.1
+    if abs(actual_duration - edit.duration) > duration_tolerance:
+        raise ValueError(
+            f"V2 output duration does not match the EDL: "
+            f"actual={actual_duration:.3f}, expected={edit.duration:.3f}, "
+            f"tolerance={duration_tolerance:.3f}"
+        )
+
+    decode = run_command(
+        [
+            toolchain.ffmpeg, "-hide_banner", "-loglevel", "error", "-xerror",
+            "-i", str(output), "-map", "0:v:0", "-map", "0:a:0", "-f", "null", os.devnull,
+        ],
+        check=False,
+    )
+    if decode.returncode != 0:
+        raise ValueError(f"V2 output failed strict full decode: {output}")
+
+
 def _preflight_v2_sources(edit: V2EditDecisionList, config: PipelineConfig, toolchain: Toolchain) -> None:
     requested_out: dict[Path, float] = {}
     for shot in edit.shots:
@@ -241,6 +316,7 @@ def render_v2_edit(
         run_command(compile_v2_final_argv(segment_paths, edit, config, toolchain, temporary), check=True)
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise RuntimeError("FFmpeg did not create a non-empty V2 output")
+        _validate_rendered_v2_output(temporary, edit, config, toolchain)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temporary, output_path)
         return output_path

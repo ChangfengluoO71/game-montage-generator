@@ -175,6 +175,88 @@ def test_renderer_preflights_all_sources_with_selected_ffprobe_before_rendering(
     assert commands[1][0] == str(fake_toolchain.ffprobe)
 
 
+def _render_with_fake_toolchain(monkeypatch, config, toolchain, edit, *, output_duration):
+    commands = []
+
+    def fake_run(argv, **kwargs):
+        commands.append([str(value) for value in argv])
+        executable = str(argv[0])
+        if executable == str(toolchain.ffprobe):
+            target = str(argv[-1])
+            if target == str(edit.music_source) or target.endswith("source.mp4"):
+                stdout = '{"streams":[{"codec_type":"video"},{"codec_type":"audio"}],"format":{"duration":"100.0"}}'
+            elif target.endswith("v2-output.mp4"):
+                stdout = (
+                    '{"streams":[{"codec_type":"video","width":1920,"height":1200,"avg_frame_rate":"60/1"},'
+                    '{"codec_type":"audio"}],"format":{"duration":"%s"}}' % output_duration
+                )
+            else:
+                raise AssertionError(f"unexpected ffprobe target: {target}")
+            return CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        if executable == str(toolchain.ffmpeg):
+            if "-filter_complex" in argv:
+                Path(argv[-1]).write_bytes(b"non-empty fake media")
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr("montage.v2_renderer.run_command", fake_run)
+    return commands
+
+
+def test_renderer_rejects_short_final_output_before_replacing_existing_v2_output(
+    fake_toolchain, base_config, tmp_path, monkeypatch
+):
+    test_config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        output_dir=tmp_path / "output",
+    )
+    source = test_config.raw_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    music = tmp_path / "music.flac"
+    music.write_bytes(b"music")
+    existing = test_config.v2_output_path
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing baseline")
+    edit = _edit(source, music)
+    _render_with_fake_toolchain(monkeypatch, test_config, fake_toolchain, edit, output_duration=40.0)
+
+    with pytest.raises(ValueError, match="duration"):
+        render_v2_edit(edit, test_config, fake_toolchain, existing)
+
+    assert existing.read_bytes() == b"existing baseline"
+
+
+def test_renderer_accepts_fully_valid_final_output_after_strict_validation(
+    fake_toolchain, base_config, tmp_path, monkeypatch
+):
+    test_config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        output_dir=tmp_path / "output",
+    )
+    source = test_config.raw_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    music = tmp_path / "music.flac"
+    music.write_bytes(b"music")
+    existing = test_config.v2_output_path
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"old output")
+    edit = _edit(source, music)
+    commands = _render_with_fake_toolchain(
+        monkeypatch, test_config, fake_toolchain, edit, output_duration=45.0
+    )
+
+    assert render_v2_edit(edit, test_config, fake_toolchain, existing) == existing
+    assert existing.read_bytes() == b"non-empty fake media"
+    assert any(command[0] == str(fake_toolchain.ffprobe) and command[-1].endswith("v2-output.mp4") for command in commands)
+    assert any(command[0] == str(fake_toolchain.ffmpeg) and "-f" in command and "null" in command for command in commands)
+
+
 def test_cpu_toolchain_uses_safe_h264_fallback(fake_toolchain, base_config, tmp_path):
     cpu = replace(fake_toolchain, nvenc_h264=False)
     argv = compile_v2_segment_argv(
