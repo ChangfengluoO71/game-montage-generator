@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -16,11 +17,12 @@ import numpy as np
 
 from .cache import atomic_write_bytes, cache_key, file_fingerprint, read_cached_json, write_cached_json
 from .config import PipelineConfig
-from .models import MusicAnalysis
+from .models import EditDecisionList, MusicAnalysis
 from .toolchain import Toolchain
 
 
 _POINT_PRIORITY = {
+    "downbeat": 7,
     "section_change": 6,
     "phrase": 5,
     "bar": 4,
@@ -28,6 +30,81 @@ _POINT_PRIORITY = {
     "beat": 2,
     "onset": 1,
 }
+
+
+@dataclass(frozen=True)
+class MusicWindowDecision:
+    baseline_music_in: float
+    baseline_music_out: float
+    v2_music_in: float
+    v2_music_out: float
+    changed: bool
+    reason: str
+
+
+def _beat_stability(beat_times: Sequence[float]) -> float:
+    beats = np.asarray(list(beat_times), dtype=float)
+    if beats.size < 3:
+        return 0.0
+    intervals = np.diff(beats)
+    mean_interval = float(np.mean(intervals))
+    if mean_interval <= 1e-9:
+        return 0.0
+    return float(np.clip(1.0 - np.std(intervals) / mean_interval * 2.0, 0.0, 1.0))
+
+
+def _phrase_boundaries(beat_times: Sequence[float]) -> tuple[list[float], float]:
+    beats = np.asarray(list(beat_times), dtype=float)
+    if beats.size < 16:
+        return [], 0.0
+    return beats[::16].astype(float).tolist(), _beat_stability(beats) * min(1.0, beats.size / 64.0)
+
+
+def choose_v2_music_window(
+    structure: dict[str, object], baseline_in: float, baseline_out: float, duration: float, max_shift: float
+) -> MusicWindowDecision:
+    """Keep V1's interval unless strong heuristic boundary evidence justifies a bounded endpoint move."""
+    baseline_in = round(float(baseline_in), 3)
+    baseline_out = round(float(baseline_out), 3)
+    max_shift = max(0.0, float(max_shift))
+    candidates: list[tuple[float, float, str]] = []
+    for item in structure.get("phrase_boundaries", []) if isinstance(structure.get("phrase_boundaries"), list) else []:
+        if isinstance(item, dict):
+            timestamp = float(item.get("timestamp", -1.0))
+            confidence = float(item.get("confidence", 0.0))
+        else:
+            timestamp, confidence = float(item), float(structure.get("phrase_confidence", 0.0))
+        candidates.append((timestamp, confidence, "phrase"))
+    regions = structure.get("regions")
+    if isinstance(regions, list):
+        for region in regions[1:]:
+            if isinstance(region, dict):
+                candidates.append((float(region.get("start", -1.0)), float(region.get("confidence", 0.0)), "section"))
+    for item in structure.get("boundaries", []) if isinstance(structure.get("boundaries"), list) else []:
+        if isinstance(item, dict):
+            candidates.append((float(item.get("timestamp", -1.0)), float(item.get("confidence", 0.0)), str(item.get("type", "section"))))
+
+    # A boundary must carry enough evidence to be materially better than an exact V1 lock.
+    eligible = [candidate for candidate in candidates if candidate[1] >= 0.70 and 0.0 <= candidate[0] <= duration]
+    endpoint_options: list[tuple[float, float, float, str]] = []
+    for timestamp, confidence, kind in eligible:
+        if 0.0 < abs(timestamp - baseline_in) <= max_shift:
+            endpoint_options.append((confidence, -abs(timestamp - baseline_in), timestamp, f"Adjusted music in to a high-confidence heuristic {kind} boundary."))
+        if 0.0 < abs(timestamp - baseline_out) <= max_shift:
+            endpoint_options.append((confidence, -abs(timestamp - baseline_out), timestamp, f"Adjusted music out to a high-confidence heuristic {kind} boundary."))
+    if endpoint_options:
+        _, _, timestamp, reason = max(endpoint_options)
+        if " in " in reason:
+            return MusicWindowDecision(baseline_in, baseline_out, round(timestamp, 3), baseline_out, True, reason)
+        return MusicWindowDecision(baseline_in, baseline_out, baseline_in, round(timestamp, 3), True, reason)
+    return MusicWindowDecision(
+        baseline_in,
+        baseline_out,
+        baseline_in,
+        baseline_out,
+        False,
+        "Retained the exact V1 baseline interval; no materially better high-confidence phrase/section boundary was within the permitted shift.",
+    )
 
 
 def _normalize(values: Sequence[float]) -> np.ndarray:
@@ -395,3 +472,187 @@ def analyze_music(config: PipelineConfig, toolchain: Toolchain) -> MusicAnalysis
     _write_music_artifacts(analysis, config)
     write_cached_json(cache_path, key, analysis.to_dict())
     return analysis
+
+
+def _write_v2_music_artifacts(
+    analysis: MusicAnalysis,
+    decision: MusicWindowDecision,
+    structure: dict[str, Any],
+    percussive_beats: Sequence[float],
+    percussive_onsets: Sequence[float],
+    config: PipelineConfig,
+) -> None:
+    from .cache import atomic_write_json
+
+    directory = config.music_v2_analysis_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        config.music_v2_beat_map_path,
+        {
+            "source_file": str(analysis.source_file),
+            "tempo": analysis.tempo,
+            "beats": analysis.beats,
+            "strong_beats": analysis.strong_beats,
+            "downbeat_attempts": analysis.bars,
+            "onsets": analysis.onsets,
+            "percussive_beats": list(percussive_beats),
+            "percussive_onsets": list(percussive_onsets),
+            "edit_points": analysis.edit_points,
+            "confidence": analysis.confidence,
+        },
+    )
+    atomic_write_json(
+        config.music_v2_structure_path,
+        {
+            "source_file": str(analysis.source_file),
+            "duration": analysis.duration,
+            "regions": analysis.structure_regions,
+            "high_energy_regions": [region for region in analysis.structure_regions if region.get("energy") == "high_energy"],
+            "low_energy_regions": [region for region in analysis.structure_regions if region.get("energy") == "low_energy"],
+            "phrase_boundaries": structure["phrase_boundaries"],
+            "section_boundaries": structure["boundaries"],
+            "section_semantics": "heuristic energy segmentation; labels are not asserted musical form.",
+            "confidence": analysis.confidence,
+            "music_window": decision.__dict__,
+        },
+    )
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(["time", "rms", "onset_strength", "percussive_onset_strength", "novelty", "energy"])
+    energy = _normalize(analysis.rms)
+    for index, timestamp in enumerate(analysis.energy_times):
+        writer.writerow([
+            f"{timestamp:.6f}",
+            f"{analysis.rms[index] if index < len(analysis.rms) else 0.0:.8f}",
+            f"{analysis.onset_strength[index] if index < len(analysis.onset_strength) else 0.0:.8f}",
+            f"{structure['percussive_onset_at_energy'][index] if index < len(structure['percussive_onset_at_energy']) else 0.0:.8f}",
+            f"{analysis.novelty[index] if index < len(analysis.novelty) else 0.0:.8f}",
+            f"{energy[index] if index < len(energy) else 0.0:.8f}",
+        ])
+    atomic_write_bytes(config.music_v2_energy_curve_path, buffer.getvalue().encode("utf-8-sig"))
+
+    figure, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+    axes[0].plot(analysis.energy_times[: len(analysis.rms)], _normalize(analysis.rms), label="RMS", color="#2563eb")
+    axes[0].plot(analysis.energy_times[: len(analysis.onset_strength)], _normalize(analysis.onset_strength), label="onset", color="#dc2626", alpha=0.7)
+    axes[0].plot(analysis.energy_times[: len(structure["percussive_onset_at_energy"])], structure["percussive_onset_at_energy"], label="percussive onset", color="#7c3aed", alpha=0.7)
+    for timestamp in analysis.beats:
+        axes[0].axvline(timestamp, color="#64748b", alpha=0.10, linewidth=0.5)
+    for timestamp in analysis.strong_beats:
+        axes[0].axvline(timestamp, color="#f59e0b", alpha=0.45, linewidth=0.8)
+    for timestamp in analysis.bars:
+        axes[0].axvline(timestamp, color="#0f172a", alpha=0.55, linewidth=1.0)
+    axes[0].axvspan(decision.v2_music_in, decision.v2_music_out, color="#22c55e", alpha=0.10, label="locked V2 range")
+    axes[0].set_ylabel("normalized signal")
+    axes[0].legend(loc="upper right", ncol=2, fontsize=8)
+    for region in analysis.structure_regions:
+        color = {"low_energy": "#cbd5e1", "medium_energy": "#fde68a", "high_energy": "#fecaca"}.get(region.get("energy"), "#e2e8f0")
+        axes[1].axvspan(region["start"], region["end"], color=color, alpha=0.55)
+    for boundary in structure["phrase_boundaries"]:
+        axes[1].axvline(boundary["timestamp"], color="#7c3aed", alpha=0.55, linestyle="--", label="phrase")
+    for boundary in structure["boundaries"]:
+        axes[1].axvline(boundary, color="#ef4444", alpha=0.45, linestyle=":", label="heuristic section")
+    axes[1].set_xlabel("music time (s)")
+    axes[1].set_ylabel("heuristic structure")
+    figure.tight_layout()
+    temporary = directory / ".music_analysis_v2.tmp.png"
+    figure.savefig(temporary, dpi=120)
+    plt.close(figure)
+    temporary.replace(config.music_v2_analysis_image_path)
+
+
+def analyze_music_v2(
+    config: PipelineConfig, toolchain: Toolchain, baseline_edit: EditDecisionList
+) -> tuple[MusicAnalysis, MusicWindowDecision]:
+    """Analyze music with HPSS while preserving the V1 edit interval by default."""
+    if not config.music_file.exists():
+        raise FileNotFoundError(f"Music file does not exist: {config.music_file}")
+    parameters = {
+        "sample_rate": config.analysis_sample_rate,
+        "ffmpeg_version": toolchain.ffmpeg_version,
+        "analysis_version": "hpss-aware-v2",
+        "hop_length": 512,
+    }
+    key = cache_key(file_fingerprint(config.music_file), "music_analysis_v2", parameters)
+    artifact_paths = (
+        config.music_v2_beat_map_path,
+        config.music_v2_structure_path,
+        config.music_v2_energy_curve_path,
+        config.music_v2_analysis_image_path,
+    )
+    cached = read_cached_json(config.music_v2_cache_path, key)
+    if isinstance(cached, dict) and isinstance(cached.get("analysis"), dict) and isinstance(cached.get("decision"), dict) and all(path.exists() for path in artifact_paths):
+        return _from_dict(cached["analysis"]), MusicWindowDecision(**cached["decision"])
+
+    samples, sample_rate = librosa.load(str(config.music_file), sr=config.analysis_sample_rate, mono=True)
+    duration = float(len(samples) / sample_rate)
+    harmonic, percussive = librosa.effects.hpss(samples)
+    del harmonic
+    tempo_value, full_frames = librosa.beat.beat_track(y=samples, sr=sample_rate, hop_length=512)
+    percussive_tempo_value, percussive_frames = librosa.beat.beat_track(y=percussive, sr=sample_rate, hop_length=512)
+    full_beats = librosa.frames_to_time(np.asarray(full_frames), sr=sample_rate, hop_length=512).astype(float)
+    percussive_beats = librosa.frames_to_time(np.asarray(percussive_frames), sr=sample_rate, hop_length=512).astype(float)
+    full_stability = _beat_stability(full_beats)
+    percussive_stability = _beat_stability(percussive_beats)
+    beats = percussive_beats if percussive_stability > full_stability and percussive_beats.size >= 3 else full_beats
+    tempo_array = np.asarray(percussive_tempo_value if beats is percussive_beats else tempo_value).reshape(-1)
+    tempo = float(tempo_array[0]) if tempo_array.size else 0.0
+    onset_values = librosa.onset.onset_strength(y=samples, sr=sample_rate, hop_length=512)
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_values, sr=sample_rate, hop_length=512, units="frames")
+    onsets = librosa.frames_to_time(onset_frames, sr=sample_rate, hop_length=512).astype(float)
+    percussive_onset_values = librosa.onset.onset_strength(y=percussive, sr=sample_rate, hop_length=512)
+    percussive_onset_frames = librosa.onset.onset_detect(onset_envelope=percussive_onset_values, sr=sample_rate, hop_length=512, units="frames")
+    percussive_onsets = librosa.frames_to_time(percussive_onset_frames, sr=sample_rate, hop_length=512).astype(float)
+    rms_values = librosa.feature.rms(y=samples, frame_length=2048, hop_length=512)[0]
+    energy_times = librosa.frames_to_time(np.arange(rms_values.size), sr=sample_rate, hop_length=512).astype(float)
+    onset_times = librosa.frames_to_time(np.arange(onset_values.size), sr=sample_rate, hop_length=512)
+    percussive_onset_at_energy = np.interp(energy_times, onset_times, _normalize(percussive_onset_values), left=0.0, right=0.0)
+    energy = _normalize(0.60 * _normalize(rms_values) + 0.22 * np.interp(energy_times, onset_times, _normalize(onset_values), left=0.0, right=0.0) + 0.18 * percussive_onset_at_energy)
+    novelty = _normalize(np.abs(np.diff(energy, prepend=energy[0] if energy.size else 0.0)))
+    structure = infer_music_structure(energy_times, energy, beats, percussive_onset_values)
+    phrase_times, phrase_confidence = _phrase_boundaries(beats)
+    structure["phrase_boundaries"] = [{"timestamp": round(timestamp, 3), "confidence": round(phrase_confidence, 4)} for timestamp in phrase_times]
+    structure["phrase_confidence"] = round(phrase_confidence, 4)
+    structure["percussive_onset_at_energy"] = percussive_onset_at_energy.tolist()
+    points = build_edit_points(tempo, beats, onsets, energy, energy_times)
+    strong_beats = beats[::2].tolist()
+    downbeats = beats[::4].tolist()
+    for timestamp in downbeats:
+        points.append({"timestamp": round(timestamp, 3), "strength": 0.8, "type": "downbeat", "confidence": round(_beat_stability(beats) * 0.65, 4)})
+    for boundary in structure["phrase_boundaries"]:
+        points.append({"timestamp": boundary["timestamp"], "strength": boundary["confidence"], "type": "phrase", "confidence": boundary["confidence"]})
+    for region in structure["regions"][1:]:
+        points.append({"timestamp": region["start"], "strength": region["confidence"], "type": "section_change", "confidence": region["confidence"]})
+    points.sort(key=lambda point: (point["timestamp"], -_POINT_PRIORITY.get(point["type"], 0)))
+    confidence = {
+        "beat": full_stability if beats is full_beats else percussive_stability,
+        "strong_beat": (full_stability if beats is full_beats else percussive_stability) * 0.9,
+        "bar": (full_stability if beats is full_beats else percussive_stability) * 0.7,
+        "downbeat": (full_stability if beats is full_beats else percussive_stability) * 0.65,
+        "phrase": phrase_confidence,
+        "section": float(structure.get("confidence", 0.0)),
+        "onset": float(structure.get("onset_confidence", 0.0)),
+        "percussive": percussive_stability,
+    }
+    decision = choose_v2_music_window(structure, baseline_edit.music_in, baseline_edit.music_out, duration, config.baseline_music_max_shift)
+    analysis = MusicAnalysis(
+        source_file=config.music_file,
+        duration=duration,
+        tempo=tempo,
+        beats=beats.tolist(),
+        strong_beats=strong_beats,
+        bars=downbeats,
+        onsets=onsets.tolist(),
+        edit_points=points,
+        energy_times=energy_times.tolist(),
+        rms=rms_values.tolist(),
+        onset_strength=onset_values.tolist(),
+        novelty=novelty.tolist(),
+        structure_regions=structure["regions"],
+        confidence={key: round(float(value), 4) for key, value in confidence.items()},
+        preview_music_in=decision.v2_music_in,
+        preview_music_out=decision.v2_music_out,
+        preview_reason=decision.reason,
+    )
+    _write_v2_music_artifacts(analysis, decision, structure, percussive_beats, percussive_onsets, config)
+    write_cached_json(config.music_v2_cache_path, key, {"analysis": analysis.to_dict(), "decision": decision.__dict__})
+    return analysis, decision

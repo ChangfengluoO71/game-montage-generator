@@ -118,6 +118,10 @@ class PipelineConfig:
         return self.music_v2_analysis_dir / "music_analysis_v2.png"
 
     @property
+    def music_v2_cache_path(self) -> Path:
+        return self.music_v2_analysis_dir / "music_analysis_v2_cache.json"
+
+    @property
     def payoff_events_v2_path(self) -> Path:
         return self.analysis_dir / "payoff_events_v2.json"
 
