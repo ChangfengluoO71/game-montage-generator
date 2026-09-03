@@ -127,7 +127,7 @@ Expected: collection failure naming the missing `montage` modules or symbols.
 
 - [ ] **Step 3: Write the minimal models/config/cache implementation**
 
-Use YAML defaults for the audited paths, `video_extensions`, `long_clip_threshold: 300`, `short_clip_threshold: 90`, `output_width: 1920`, `output_height: 1200`, `preview_min_duration: 45`, and `preview_max_duration: 60`. Resolve all configured paths with `Path(...).expanduser()` without touching source files. `atomic_write_json` writes beside the target with a unique `.tmp` name, flushes, replaces the target, and cleans the temporary file on error. `assert_source_read_only` accepts an existing path under `raw` only for reads and rejects any generated target under `raw`.
+Use YAML defaults for the audited paths, `video_extensions`, `long_clip_threshold: 300`, `short_clip_threshold: 90`, `output_width: 1920`, `output_height: 1200`, `preview_min_duration: 45`, `preview_max_duration: 60`, and `preview_preferred_shot_max_duration: 20`. Resolve all configured paths with `Path(...).expanduser()` without touching source files. `atomic_write_json` writes beside the target with a unique `.tmp` name, flushes, replaces the target, and cleans the temporary file on error. `assert_source_read_only` accepts an existing path under `raw` only for reads and rejects any generated target under `raw`.
 
 - [ ] **Step 4: Run the focused tests and verify they pass**
 
@@ -136,7 +136,7 @@ Expected: all tests pass with no warnings.
 
 - [ ] **Step 5: Add the dependency and user-facing configuration documentation**
 
-`requirements.txt` must contain `numpy`, `scipy`, `librosa`, `soundfile`, `matplotlib`, `PyYAML`, and `pytest`. `config.yaml` must expose `raw_dir`, `work_dir`, `output_dir`, `music_file`, `proxy_resolution`, `short_clip_threshold`, `long_clip_threshold`, `pre_roll`, `post_roll`, `analysis_fps`, `highlight_min_duration`, `highlight_max_duration`, `weights`, `fast_montage_target`, `full_highlight_target`, `preview_min_duration`, `preview_max_duration`, `nvenc`, and `audio_mix` without hard-coding weights in ranking code.
+`requirements.txt` must contain `numpy`, `scipy`, `librosa`, `soundfile`, `matplotlib`, `PyYAML`, and `pytest`. `config.yaml` must expose `raw_dir`, `work_dir`, `output_dir`, `music_file`, `proxy_resolution`, `short_clip_threshold`, `long_clip_threshold`, `pre_roll`, `post_roll`, `analysis_fps`, `highlight_min_duration`, `highlight_max_duration`, `weights`, `fast_montage_target`, `full_highlight_target`, `preview_min_duration`, `preview_max_duration`, `preview_preferred_shot_max_duration`, `nvenc`, and `audio_mix` without hard-coding weights in ranking code.
 
 ## Task 2: Pin a working FFmpeg/ffprobe toolchain and build the media index
 

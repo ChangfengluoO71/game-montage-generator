@@ -1,0 +1,58 @@
+raw_dir: 'D:\91\集锦\raw'
+work_dir: 'D:\91\集锦\work'
+output_dir: 'D:\91\集锦\output'
+music_file: 'C:\Users\cfl\Music\[2026.07.05] TVアニメ「無職転生Ⅲ ～異世界行ったら本気だす～」OPテーマ「決意の唄」／大原ゆい子 [FLAC 96kHz／24bit]\01. 決意の唄.flac'
+
+video_extensions: ['.mp4', '.mkv', '.mov', '.webm']
+proxy_resolution: [960, 540]
+short_clip_threshold: 90.0
+long_clip_threshold: 300.0
+pre_roll: 4.0
+post_roll: 6.0
+analysis_fps: 2.0
+analysis_sample_rate: 22050
+highlight_min_duration: 3.0
+highlight_max_duration: 30.0
+activity_threshold_percentile: 75.0
+activity_merge_gap: 3.0
+fingerprint_interval: 2.0
+dedupe_threshold: 0.78
+
+output_width: 1920
+output_height: 1200
+target_fps: 60.0
+preview_min_duration: 45.0
+preview_max_duration: 60.0
+preview_preferred_shot_max_duration: 20.0
+
+weights:
+  human_selection_prior: 0.30
+  combat_intensity: 0.20
+  motion: 0.10
+  audio_activity: 0.10
+  visual_activity: 0.10
+  continuity: 0.10
+  uniqueness: 0.10
+
+fast_montage_target: music
+full_highlight_target: 230.0
+
+nvenc:
+  prefer: true
+  video_encoder: h264_nvenc
+  fallback_encoder: libx264
+  probe_width: 1280
+  probe_height: 720
+  probe_duration: 0.5
+
+audio_mix:
+  game_gain_db: -3.0
+  music_gain_db: -9.0
+  combat_music_duck_db: -5.0
+  combat_game_boost_db: 2.0
+  attack_ms: 50
+  release_ms: 500
+  target_lufs: -14.0
+  true_peak_db: -1.0
+  sample_rate: 48000
+  bitrate: 320k

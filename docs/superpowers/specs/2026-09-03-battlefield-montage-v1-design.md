@@ -191,7 +191,7 @@ Results are saved to `work/analysis/highlight_candidates.json` and `.csv`. `dedu
 }
 ```
 
-The preview selection chooses one representative 45–60-second music window that includes a detected build-up/section boundary and high-energy region. It assigns shots by narrative energy rather than sorting final score descending: medium material opens, activity rises toward the chosen chorus/high-energy section, and the strongest available candidate closes the preview. A normal beat can align an action inside a shot but cannot force a cut. A continuous multi-kill remains intact even when it crosses several beats.
+The preview selection chooses one representative 45–60-second music window that includes a detected build-up/section boundary and high-energy region. It assigns shots by narrative energy rather than sorting final score descending: medium material opens, activity rises toward the chosen chorus/high-energy section, and the strongest available candidate closes the preview. For the first preview, candidates up to 20 seconds are preferred when enough coherent saved clips exist; longer coherent shots remain eligible when they are the better continuity choice. A normal beat can align an action inside a shot but cannot force a cut. A continuous multi-kill remains intact even when it crosses several beats.
 
 `preview_timeline.txt` is generated from the same EDL and is intended for manual inspection. It includes the source range, score, music section/energy, sync event and offset, transition, and rationale for every shot.
 
