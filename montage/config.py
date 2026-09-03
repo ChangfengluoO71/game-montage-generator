@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,9 @@ class PipelineConfig:
     full_highlight_target: float
     nvenc: dict[str, Any]
     audio_mix: dict[str, Any]
+    boundary_window_ms: int = 500
+    anchor_sync_tolerance: float = 0.75
+    transition_compatibility_weights: dict[str, float] = field(default_factory=dict)
 
     @property
     def analysis_dir(self) -> Path:
@@ -263,6 +266,9 @@ def load_config(path: Path) -> PipelineConfig:
         full_highlight_target=float(raw.get("full_highlight_target", 230.0)),
         nvenc=nvenc,
         audio_mix=audio_mix,
+        boundary_window_ms=int(raw.get("boundary_window_ms", 500)),
+        anchor_sync_tolerance=float(raw.get("anchor_sync_tolerance", 0.75)),
+        transition_compatibility_weights={str(k): float(v) for k, v in (raw.get("transition_compatibility_weights") or {}).items()},
     )
 
 

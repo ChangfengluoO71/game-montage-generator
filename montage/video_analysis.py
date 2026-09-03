@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import matplotlib
 
@@ -15,7 +15,7 @@ import numpy as np
 
 from .cache import atomic_write_json
 from .config import PipelineConfig
-from .models import MediaRecord, VideoAnalysis
+from .models import BoundaryDescriptor, CandidateVariant, MediaRecord, VideoAnalysis
 from .toolchain import Toolchain
 
 
@@ -28,6 +28,44 @@ def normalize_signal(values: Sequence[float]) -> list[float]:
     if high <= low + 1e-12:
         return [0.0] * int(array.size)
     return np.clip((array - low) / (high - low), 0.0, 1.0).tolist()
+
+
+def describe_variant_boundary(
+    variant: CandidateVariant, analysis: VideoAnalysis | None, side: Literal["start", "end"]
+) -> BoundaryDescriptor:
+    """Describe only the small source edge used for a natural gameplay cut."""
+    if side not in {"start", "end"}:
+        raise ValueError("boundary side must be start or end")
+    segment = variant.source_segments[0] if side == "start" else variant.source_segments[-1]
+    edge = segment.source_in if side == "start" else segment.source_out
+    values: dict[str, float] = {}
+    if analysis is not None and analysis.times:
+        window = 0.5
+        selected = [i for i, timestamp in enumerate(analysis.times) if abs(timestamp - edge) <= window]
+        if selected:
+            def mean(name: str, fallback: float = 0.5) -> float:
+                sequence = getattr(analysis, name, [])
+                samples = [float(sequence[i]) for i in selected if i < len(sequence)]
+                return float(np.mean(samples)) if samples else fallback
+            values = {
+                "motion_strength": mean("motion"),
+                "luminance": mean("brightness"),
+                "visual_tone": mean("visual"),
+                "impact_strength": max(mean("audio", 0.0), mean("activity", 0.0)),
+            }
+    if not values:
+        values = {"motion_strength": 0.5, "luminance": 0.5, "visual_tone": 0.5, "impact_strength": 0.0}
+    direction = "forward" if variant.motion >= 0.55 else "neutral"
+    ads = "ads" if variant.weapon_or_view_signature.lower() in {"ads", "aim", "scoped"} else "unknown"
+    return BoundaryDescriptor(
+        motion_direction=direction,
+        weapon_motion=values["motion_strength"],
+        ads_state=ads,
+        environment_signature=variant.environment_signature,
+        source_signature=variant.source_signature,
+        confidence=0.8 if analysis is not None and analysis.times else 0.25,
+        **values,
+    )
 
 
 def merge_activity_peaks(

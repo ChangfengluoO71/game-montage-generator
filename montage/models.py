@@ -61,6 +61,41 @@ class VideoAnalysis(Serializable):
     candidate_windows: list[dict[str, float]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class BoundaryDescriptor(Serializable):
+    motion_direction: str = "neutral"
+    motion_strength: float = 0.5
+    luminance: float = 0.5
+    visual_tone: float = 0.5
+    ads_state: str = "unknown"
+    weapon_motion: float = 0.5
+    impact_strength: float = 0.0
+    environment_signature: str = ""
+    source_signature: str = ""
+    confidence: float = 0.0
+
+
+@dataclass(frozen=True)
+class AnchorPlacement(Serializable):
+    source_anchor_time: float
+    target_music_time: float
+    event_type: str
+    event_sync_offset: float
+    context_integrity_score: float
+    source_in: float
+    source_out: float
+
+
+@dataclass(frozen=True)
+class TransitionDecision(Serializable):
+    transition: str
+    effect: str | None
+    compatibility_score: float
+    impact_cut: bool
+    audio_j_cut_ms: int
+    audio_l_cut_ms: int
+
+
 @dataclass
 class MusicAnalysis(Serializable):
     source_file: Path
