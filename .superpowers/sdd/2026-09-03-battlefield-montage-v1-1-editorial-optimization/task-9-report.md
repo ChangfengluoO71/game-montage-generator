@@ -24,10 +24,12 @@
 - Passed cached or freshly computed per-source audio evidence into payoff detection.
 - Reloaded cached payoff events and dedupe diagnostics on variant-cache hits without overwriting them with empty values.
 - Strengthened V2 source preflight/verification to probe each distinct regular source with selected ffprobe, require finite duration and audio/video streams, validate every range, and retain RAW/baseline integrity checks.
+- Bound the aggregate V2 candidate/event artifacts to a cache identity derived from V1 analysis inputs, detector parameters, and the runtime-tested FFmpeg version. Regenerated inputs now replace stale payoff events; genuine hits validate and reload cached events plus dedupe diagnostics.
+- Marked unavailable V1 penalty ratios and rejection counts as `null` with `v1_available=false` and a reason; deltas are emitted only when both sides are available while numeric V2 metrics remain intact.
 
 ## Commit hash
 
-Implementation commit hash before the report-only amendment: `43d2f0fb54e6b28c7e3ca054ba764a3047c55c1c`.
+Implementation commit hash before this replacement fix: `cba5837`.
 
 ## Caveats
 

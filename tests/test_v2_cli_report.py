@@ -75,7 +75,33 @@ def test_report_contains_baseline_and_event_metrics(tmp_path):
     assert "v1_macro_shot_count" in report
     assert "delta_macro_shot_count" in report
     assert report["comparisons"]["music_range"]["delta"] == [0.0, 0.0]
-    assert report["comparisons"]["rejected_by_stationary_ads"]["v1"] == 0
+    assert report["comparisons"]["rejected_by_stationary_ads"]["v1"] is None
+    assert report["comparisons"]["rejected_by_stationary_ads"]["v1_available"] is False
+    assert report["comparisons"]["rejected_by_stationary_ads"]["v1_reason"]
+
+
+def test_report_distinguishes_unavailable_v1_penalties_from_zero(tmp_path):
+    report = build_v2_sync_report(_v2_edit(tmp_path), _baseline(), [], {}, lookback_window=2)
+    pair = report["comparisons"]["stationary_ads_duration_ratio"]
+    assert pair["v1"] is None
+    assert pair["v1_available"] is False
+    assert pair["v1_reason"] == "V1 penalty artifacts are unavailable"
+    assert pair["v2"] == 0.0
+    assert pair["delta"] is None
+
+
+def test_stale_event_artifact_is_not_a_valid_variant_cache_hit(tmp_path):
+    config = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"), work_dir=tmp_path)
+    config.analysis_dir.mkdir(parents=True, exist_ok=True)
+    stale = _event("stale", "kill", 1.0)
+    config.payoff_events_v2_path.write_text(
+        json.dumps({"cache_key": "old-inputs", "events": [stale.to_dict()], "event_count": 1}),
+        encoding="utf-8",
+    )
+    config.highlight_candidates_v2_path.write_text(
+        json.dumps({"cache_key": "old-inputs", "candidates": []}), encoding="utf-8"
+    )
+    assert main._v2_artifact_cache_hit(config, "new-inputs") is False
 
 
 def test_plot_is_created_below_work(tmp_path):

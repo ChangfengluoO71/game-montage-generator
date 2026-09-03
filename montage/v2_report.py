@@ -30,19 +30,30 @@ def _sync_values(edit: V2EditDecisionList, field: str) -> list[float]:
     return [float(getattr(shot, field, 0.0)) for shot in edit.shots]
 
 
-def _ratio(variants: Sequence[CandidateVariant], key: str) -> float:
+def _ratio(variants: Sequence[CandidateVariant], key: str, *, unavailable: bool = False) -> float | None:
+    if unavailable and not variants:
+        return None
     values = [float(variant.penalty_values.get(key, variant.penalty_values.get(f"{key}_penalty", 0.0)))
               for variant in variants]
     return statistics.fmean(values) if values else 0.0
 
 
 def _metric_pair(v1: object, v2: object) -> dict[str, object]:
-    if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
-        return {"v1": v1, "v2": v2, "delta": float(v2) - float(v1)}
-    return {"v1": v1, "v2": v2, "delta": None}
+    v1_available = v1 is not None
+    v2_available = v2 is not None
+    delta = float(v2) - float(v1) if v1_available and v2_available and isinstance(v1, (int, float)) and isinstance(v2, (int, float)) else None
+    result = {"v1": v1, "v2": v2, "delta": delta}
+    if not v1_available:
+        result["v1_available"] = False
+        result["v1_reason"] = "V1 penalty artifacts are unavailable"
+    if not v2_available:
+        result["v2_available"] = False
+        result["v2_reason"] = "V2 metric is unavailable"
+    return result
 
 
-def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookback_window: int = 2) -> dict[str, object]:
+def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookback_window: int = 2,
+                  penalty_metrics_unavailable: bool = False) -> dict[str, object]:
     durations = _shot_durations(edit)
     shots = list(getattr(edit, "shots", ()))
     event = _stats([getattr(shot, "event_sync_offset", getattr(shot, "sync_offset", 0.0)) for shot in shots])
@@ -78,9 +89,9 @@ def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookb
         "transition_compatibility_mean": statistics.fmean(
             [float(getattr(shot, "transition_compatibility_score", 0.0)) for shot in shots]
         ) if shots else 0.0,
-        "stationary_ads_duration_ratio": _ratio(variants, "stationary_ads"),
-        "estimated_downtime_ratio": _ratio(variants, "downtime"),
-        "repetitive_fire_ratio": _ratio(variants, "repetitive_fire"),
+        "stationary_ads_duration_ratio": _ratio(variants, "stationary_ads", unavailable=penalty_metrics_unavailable),
+        "estimated_downtime_ratio": _ratio(variants, "downtime", unavailable=penalty_metrics_unavailable),
+        "repetitive_fire_ratio": _ratio(variants, "repetitive_fire", unavailable=penalty_metrics_unavailable),
         "same_environment_consecutive_count": same_env,
         "same_source_recent_penalty_count": same_source_recent,
     }
@@ -91,7 +102,7 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
                          *, lookback_window: int = 2) -> dict[str, object]:
     rapid_scores = [float(getattr(variant, "rapid_multikill_score", 0.0)) for variant in variants]
     v2 = _edit_metrics(edit, variants=variants, lookback_window=lookback_window)
-    v1 = _edit_metrics(baseline, lookback_window=lookback_window)
+    v1 = _edit_metrics(baseline, lookback_window=lookback_window, penalty_metrics_unavailable=True)
     comparison_keys = tuple(v2)
     comparisons = {key: _metric_pair(v1[key], v2[key]) for key in comparison_keys}
     comparisons["music_range"] = {
@@ -104,11 +115,11 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
         "rejected_by_downtime": int(rejected.get("downtime", rejected.get("rejected_by_downtime", 0))),
         "rejected_by_no_payoff": int(rejected.get("no_payoff", rejected.get("rejected_by_no_payoff", 0))),
     }
-    comparisons.update({key: _metric_pair(0, value) for key, value in rejected_metrics.items()})
+    comparisons.update({key: _metric_pair(None, value) for key, value in rejected_metrics.items()})
     for key, value in rejected.items():
         normalized = str(key)
         comparison_name = normalized if normalized.startswith("rejected_by_") else f"rejected_by_{normalized}"
-        comparisons.setdefault(comparison_name, _metric_pair(0, int(value)))
+        comparisons.setdefault(comparison_name, _metric_pair(None, int(value)))
     report: dict[str, object] = {
         "report_version": "v2-sync-1",
         "diagnostic_evidence": True,

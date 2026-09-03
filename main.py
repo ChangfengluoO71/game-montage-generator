@@ -24,6 +24,7 @@ from montage.cache import (
     cache_key,
     file_fingerprint,
     read_cached_json,
+    v2_cache_key,
     write_cached_json,
 )
 from montage.candidate import generate_candidates, write_candidates
@@ -335,6 +336,67 @@ def _load_cached_payoff_events(config: PipelineConfig) -> list[PayoffEvent]:
     return [_event_from_dict(row) for row in rows]
 
 
+def _v2_cache_inputs(config: PipelineConfig) -> list[dict[str, object]]:
+    """Fingerprint the V1 analysis inputs which feed aggregate V2 artifacts."""
+    paths = [config.analysis_dir / "highlight_candidates.json", config.analysis_dir / "media_index.json"]
+    paths.extend(sorted(config.analysis_dir.glob("video_*.json")))
+    paths.extend(sorted(config.analysis_dir.glob("audio_*.json")))
+    inputs = [file_fingerprint(path) for path in paths if path.is_file()]
+    candidate_path = config.analysis_dir / "highlight_candidates.json"
+    if candidate_path.is_file():
+        try:
+            rows = json.loads(candidate_path.read_text(encoding="utf-8")).get("candidates", [])
+            source_paths = {Path(row["source_file"]) for row in rows if isinstance(row, dict) and row.get("source_file")}
+            inputs.extend(file_fingerprint(path) for path in sorted(source_paths) if path.is_file())
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            pass
+    if config.music_v2_cache_path.is_file():
+        inputs.append(file_fingerprint(config.music_v2_cache_path))
+    return sorted(inputs, key=lambda item: str(item.get("absolute_path", "")))
+
+
+def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
+    return v2_cache_key(
+        {"inputs": _v2_cache_inputs(config)},
+        "v2_variants_and_events",
+        {
+            "stage_version": "v2-aggregate-artifacts-2",
+            "ffmpeg_version": toolchain.ffmpeg_version,
+            "detector_version": config.payoff_detector_version,
+            "payoff_analysis_fps": config.payoff_analysis_fps,
+            "event_merge_window_ms": config.event_merge_window_ms,
+            "strong_anchor_threshold": config.strong_anchor_threshold,
+            "weak_anchor_threshold": config.weak_anchor_threshold,
+            "roi_profile_version": config.roi_profile.get("version", 1),
+        },
+    )
+
+
+def _v2_artifact_cache_hit(config: PipelineConfig, expected_key: str) -> bool:
+    """Accept cached variants only when their validated event artifact shares identity."""
+    try:
+        candidates = json.loads(config.highlight_candidates_v2_path.read_text(encoding="utf-8"))
+        events = json.loads(config.payoff_events_v2_path.read_text(encoding="utf-8"))
+        if not isinstance(candidates, dict) or candidates.get("cache_key") != expected_key:
+            return False
+        if not isinstance(events, dict) or events.get("cache_key") != expected_key:
+            return False
+        rows = candidates.get("candidates")
+        event_rows = events.get("events")
+        if not isinstance(rows, list) or not rows or not isinstance(event_rows, list):
+            return False
+        if not config.dedupe_summary_v2_path.exists() or not isinstance(
+            json.loads(config.dedupe_summary_v2_path.read_text(encoding="utf-8")), dict
+        ):
+            return False
+        if events.get("event_count") not in (None, len(event_rows)):
+            return False
+        _load_cached_payoff_events(config)
+        return True
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+
+
 def _cached_audio_evidence(config: PipelineConfig, candidate: Candidate, records: list[MediaRecord],
                            toolchain: Toolchain) -> dict[str, Any]:
     """Load the V1 per-source audio cache, computing it only when absent."""
@@ -393,12 +455,15 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     music, window = analyze_music_v2(config, toolchain, baseline)
     logger.info("V2 music range %.3f-%.3f (baseline %.3f-%.3f)", window.v2_music_in, window.v2_music_out,
                 window.baseline_music_in, window.baseline_music_out)
+    aggregate_key = _v2_artifact_cache_key(config, toolchain)
     variants = _load_v2_variants(config)
     logger.info("V2 cache %s; candidate cache %s", "hit" if config.music_v2_cache_path.exists() else "miss",
                 "hit" if config.highlight_candidates_v2_path.exists() else "miss")
     events: list[PayoffEvent] = []
     rejected: dict[str, int] = {}
-    if not variants:
+    cache_hit = bool(variants) and _v2_artifact_cache_hit(config, aggregate_key)
+    if not cache_hit:
+        variants = []
         candidates_path = config.analysis_dir / "highlight_candidates.json"
         if candidates_path.exists():
             rows = json.loads(candidates_path.read_text(encoding="utf-8")).get("candidates", [])
@@ -428,6 +493,9 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
                 write_v2_candidates(variants, config.highlight_candidates_v2_path,
                                     config.highlight_candidates_v2_csv_path, config=config)
                 write_v2_dedupe_summary(dedupe, config.dedupe_summary_v2_path)
+                candidate_payload = json.loads(config.highlight_candidates_v2_path.read_text(encoding="utf-8"))
+                candidate_payload["cache_key"] = aggregate_key
+                atomic_write_json(config.highlight_candidates_v2_path, candidate_payload)
             else:
                 dedupe = None
         else:
@@ -440,8 +508,10 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
             if not isinstance(cached_dedupe, dict):
                 raise RuntimeError("cached dedupe_summary_v2.json is invalid")
             dedupe = cached_dedupe
-    if not variants or not config.payoff_events_v2_path.exists():
-        write_payoff_events(events, config.payoff_events_v2_path, config)
+    write_payoff_events(events, config.payoff_events_v2_path, config)
+    event_payload = json.loads(config.payoff_events_v2_path.read_text(encoding="utf-8"))
+    event_payload["cache_key"] = aggregate_key
+    atomic_write_json(config.payoff_events_v2_path, event_payload)
     if not variants:
         raise RuntimeError("V2 candidate variants are unavailable; run V1 analysis artifacts first")
     edit = build_v2_preview_edit(variants, music, baseline, config)
