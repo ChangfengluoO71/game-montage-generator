@@ -43,7 +43,7 @@ def compile_shot_argv(
         base_music_gain -= float(config.audio_mix.get("combat_music_duck_db", 5.0))
     graph = (
         "[0:v:0]setpts=PTS-STARTPTS,"
-        f"scale={config.output_width}:{config.output_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"scale=w='min(iw,{config.output_width})':h='min(ih,{config.output_height})':force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={config.output_width}:{config.output_height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v];"
         + build_audio_filter("0:a:0", "1:a:0", base_game_gain, base_music_gain)
     )

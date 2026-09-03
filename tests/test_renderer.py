@@ -50,6 +50,20 @@ def test_audio_filter_ducks_music_but_keeps_game_audio():
     assert "game" in graph and "music" in graph
 
 
+def test_renderer_fit_does_not_upscale_small_sources(fake_toolchain, base_config):
+    argv = compile_shot_argv(
+        edit_shot(),
+        Path(r"C:\音乐\決意.flac"),
+        Path("segment.mp4"),
+        base_config,
+        fake_toolchain,
+    )
+
+    graph = argv[argv.index("-filter_complex") + 1]
+
+    assert "scale=w='min(iw,1920)':h='min(ih,1200)'" in graph
+
+
 def test_renderer_rejects_shot_outside_source_duration(fake_toolchain, base_config):
     with pytest.raises(ValueError):
         compile_shot_argv(

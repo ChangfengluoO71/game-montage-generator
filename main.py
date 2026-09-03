@@ -437,6 +437,7 @@ def write_preview_report(
         f"Preview music_in: {edit.music_in:.3f}; music_out: {edit.music_out:.3f}.",
         f"Reason: {edit.music_reason}",
         f"Confidence: {json.dumps(music.confidence, ensure_ascii=False)}",
+        "Section roles are heuristic energy labels; confidence does not assert verified verse/chorus semantics.",
         f"Regions: {json.dumps(music.structure_regions, ensure_ascii=False)}",
         "",
         "## C. Selected candidates",
