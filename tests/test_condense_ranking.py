@@ -89,6 +89,16 @@ def test_event_below_weak_anchor_threshold_cannot_force_condensation():
     assert secondary == ()
 
 
+@pytest.mark.parametrize(("confidence", "strength"), [(0.4, 0.9), (0.9, 0.4)])
+def test_anchor_requires_confidence_and_strength_above_weak_threshold(confidence, strength):
+    primary, secondary = select_anchors(
+        [make_event("half-weak", 8.0, confidence, strength, "kill")],
+        0.0, 10.0, make_music(), test_config())
+
+    assert primary is None
+    assert secondary == ()
+
+
 def test_stationary_ads_penalty_is_payoff_aware():
     features = {"stationary_ads": 0.9, "motion": 0.1,
                 "visual_novelty": 0.1, "danger_escalation": 0.1,
@@ -115,6 +125,42 @@ def test_condensed_variant_preserves_saved_short_clip_prior_and_anchor_context()
     assert context_integrity_score(candidate, variant.primary_anchor, variant.source_segments) >= test_config().minimum_context_integrity
 
 
+def test_boundary_anchor_falls_back_to_original_continuous_range():
+    candidate = make_long_candidate()
+    anchor = make_event("boundary", 0.2, 0.9, 0.9, "kill")
+    unsafe_segment = SourceSegment(candidate.source_file, 0.0, 6.0, 6.0)
+
+    assert context_integrity_score(candidate, anchor, (unsafe_segment,)) < test_config().minimum_context_integrity
+    variant = build_condensed_variants(candidate, [anchor], make_music(), test_config())[0]
+    assert variant.source_segments == (SourceSegment(candidate.source_file, 0.0, 20.0, 20.0),)
+
+
+def test_generated_variant_uses_explicit_feature_runs_for_penalties():
+    candidate = replace(
+        make_long_candidate(),
+        feature_runs={
+            "stationary_ads": 0.9,
+            "motion": 0.1,
+            "visual_novelty": 0.1,
+            "danger_escalation": 0.1,
+            "downtime": 0.8,
+            "same_view": 0.7,
+            "repetitive_fire": 0.6,
+        },
+    )
+    no_payoff = build_condensed_variants(candidate, [], make_music(), test_config())[0]
+    with_payoff = build_condensed_variants(
+        candidate, [make_event("kill", 14.0, 0.9, 0.9, "kill")], make_music(), test_config())[0]
+
+    assert no_payoff.penalty_values["stationary_ads_penalty"] > 0.0
+    assert no_payoff.penalty_values["downtime_penalty"] > 0.0
+    assert no_payoff.penalty_values["same_view_penalty"] > 0.0
+    assert no_payoff.penalty_values["repetitive_fire_penalty"] > 0.0
+    assert with_payoff.penalty_values["stationary_ads_penalty"] < no_payoff.penalty_values["stationary_ads_penalty"]
+    assert with_payoff.penalty_values["downtime_penalty"] < no_payoff.penalty_values["downtime_penalty"]
+    assert with_payoff.penalty_values["repetitive_fire_penalty"] < no_payoff.penalty_values["repetitive_fire_penalty"]
+
+
 def test_variant_scoring_uses_all_configured_v11_components_and_penalties():
     candidate = make_long_candidate()
     segment = SourceSegment(candidate.source_file, 0.0, 8.0, 8.0)
@@ -135,7 +181,7 @@ def test_variant_scoring_uses_all_configured_v11_components_and_penalties():
     assert set(test_config().v2_weights) <= set(scored.to_dict()["score_components"])
 
 
-def test_v2_candidate_writer_serializes_score_components_and_penalties(tmp_path):
+def test_v2_candidate_writer_serializes_score_components_and_penalties_to_configured_work(tmp_path):
     from montage.candidate import write_v2_candidates
 
     candidate = make_long_candidate()
@@ -151,13 +197,31 @@ def test_v2_candidate_writer_serializes_score_components_and_penalties(tmp_path)
         environment_signature="environment", weapon_or_view_signature="view", condense_reason="", rationale="test",
         score_components={"payoff_score": 0.2, "downtime_penalty": 0.1},
     )
-    json_path = tmp_path / "candidates.json"
-    csv_path = tmp_path / "candidates.csv"
+    config = replace(test_config(), raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", output_dir=tmp_path / "output")
+    json_path = config.highlight_candidates_v2_path
+    csv_path = config.highlight_candidates_v2_csv_path
 
-    write_v2_candidates([variant], json_path, csv_path)
+    write_v2_candidates([variant], json_path, csv_path, config)
 
     assert '"score_components"' in json_path.read_text(encoding="utf-8")
     with csv_path.open(encoding="utf-8-sig", newline="") as stream:
         row = next(csv.DictReader(stream))
     assert row["payoff_score"] == "0.2"
     assert row["downtime_penalty"] == "0.1"
+
+
+@pytest.mark.parametrize("destination", ("raw", "baseline", "outside"))
+def test_v2_candidate_writer_rejects_non_work_destinations(tmp_path, destination):
+    from montage.candidate import write_v2_candidates
+
+    config = replace(test_config(), raw_dir=tmp_path / "raw", work_dir=tmp_path / "work", output_dir=tmp_path / "output")
+    if destination == "raw":
+        path = config.raw_dir / "highlight_candidates_v2.json"
+    elif destination == "baseline":
+        path = config.baseline_output_path
+    else:
+        path = tmp_path / "outside" / "highlight_candidates_v2.json"
+
+    with pytest.raises(ValueError, match="work_dir"):
+        write_v2_candidates([], path, path.with_suffix(".csv"), config)
+    assert not path.exists()

@@ -12,7 +12,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from .cache import atomic_write_bytes
-from .config import PipelineConfig
+from .config import PipelineConfig, is_within, load_config
 from .models import Candidate, CandidateVariant, MediaRecord, VideoAnalysis
 
 
@@ -76,6 +76,27 @@ def _fallback_window(analysis: VideoAnalysis, duration: float, config: PipelineC
     return core_start, core_end
 
 
+_FEATURE_RUN_NAMES = {
+    "stationary_ads",
+    "same_view",
+    "downtime",
+    "repetitive_fire",
+    "same_source_recent",
+    "same_environment_recent",
+    "danger_escalation",
+    "motion",
+    "visual_novelty",
+}
+
+
+def _feature_runs(window: Mapping[str, float]) -> dict[str, float]:
+    return {
+        name: float(value)
+        for name, value in window.items()
+        if name in _FEATURE_RUN_NAMES and isinstance(value, (int, float))
+    }
+
+
 def generate_candidates(
     records: Sequence[MediaRecord],
     analyses: Mapping[str, VideoAnalysis],
@@ -87,23 +108,27 @@ def generate_candidates(
         if analysis is None:
             continue
         if record.duration <= config.short_clip_threshold:
-            windows = [(0.0, record.duration)]
+            windows = [(0.0, record.duration, {})]
             human_prior = 0.42
         else:
             core_windows = [
-                (float(window["start"]), float(window["end"]))
+                window
                 for window in analysis.candidate_windows
                 if float(window.get("end", 0.0)) > float(window.get("start", 0.0))
             ]
             if not core_windows:
                 fallback = _fallback_window(analysis, record.duration, config)
-                core_windows = [fallback] if fallback else []
+                core_windows = [{"start": fallback[0], "end": fallback[1]}] if fallback else []
             windows = [
-                (max(0.0, start - config.pre_roll), min(record.duration, end + config.post_roll))
-                for start, end in core_windows
+                (
+                    max(0.0, float(window["start"]) - config.pre_roll),
+                    min(record.duration, float(window["end"]) + config.post_roll),
+                    _feature_runs(window),
+                )
+                for window in core_windows
             ]
             human_prior = 0.0
-        for start, end in windows:
+        for start, end, feature_runs in windows:
             if end - start < max(1.0, config.highlight_min_duration):
                 continue
             candidate = Candidate(
@@ -120,6 +145,7 @@ def generate_candidates(
                 combat_intensity=_mean_score(analysis.activity, analysis.times, start, end, high=True),
                 source_category=record.category,
                 rationale="Human-saved short clip retained as one coherent candidate." if human_prior else "Merged activity/audio window from a long recording with context roll.",
+                feature_runs=feature_runs,
             )
             candidates.append(trim_non_content_edges(candidate, analysis) if human_prior else candidate)
     return candidates
@@ -154,8 +180,27 @@ def write_candidates(candidates: Sequence[Candidate], json_path: Path, csv_path:
     atomic_write_bytes(csv_path, buffer.getvalue().encode("utf-8-sig"))
 
 
-def write_v2_candidates(variants: Sequence[CandidateVariant], json_path: Path, csv_path: Path) -> None:
+def _default_writer_config() -> PipelineConfig:
+    return load_config(Path(__file__).resolve().parents[1] / "config.yaml")
+
+
+def _assert_v2_candidate_destinations(json_path: Path, csv_path: Path, config: PipelineConfig) -> None:
+    for path in (json_path, csv_path):
+        destination = path.resolve(strict=False)
+        if (
+            destination == config.baseline_output_path.resolve(strict=False)
+            or is_within(destination, config.raw_dir)
+            or not is_within(destination, config.work_dir)
+        ):
+            raise ValueError(f"V2 candidate artifacts must remain beneath work_dir: {destination}")
+
+
+def write_v2_candidates(
+    variants: Sequence[CandidateVariant], json_path: Path, csv_path: Path, config: PipelineConfig | None = None
+) -> None:
     """Write V2 candidate diagnostics, including every score component and penalty."""
+    config = config or _default_writer_config()
+    _assert_v2_candidate_destinations(json_path, csv_path, config)
     records = [variant.to_dict() for variant in variants]
     atomic_write_bytes(json_path, json.dumps({"candidates": records}, ensure_ascii=False, indent=2).encode("utf-8"))
     fields = sorted({key for record in records for key in record} | {

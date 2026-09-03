@@ -101,6 +101,7 @@ class Candidate(Serializable):
     source_category: str = ""
     fingerprint: list[int] = field(default_factory=list)
     rationale: str = ""
+    feature_runs: dict[str, float] = field(default_factory=dict)
 
     @property
     def human_selection_prior(self) -> float:

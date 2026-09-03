@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
 from typing import Sequence
 
 from .config import PipelineConfig
@@ -60,7 +59,8 @@ def select_anchors(
     eligible = [
         event for event in events
         if candidate_start <= event.source_time <= candidate_end
-        and max(event.confidence, event.strength) >= config.weak_anchor_threshold
+        and event.confidence >= config.weak_anchor_threshold
+        and event.strength >= config.weak_anchor_threshold
     ]
     if not eligible:
         return None, ()
@@ -72,7 +72,8 @@ def select_anchors(
     primary = ordered[0]
     secondary = tuple(
         event for event in ordered[1:config.max_anchor_count_per_candidate]
-        if max(event.confidence, event.strength) >= config.weak_anchor_threshold
+        if event.confidence >= config.weak_anchor_threshold
+        and event.strength >= config.weak_anchor_threshold
     )
     return primary, secondary
 
@@ -86,14 +87,23 @@ def context_integrity_score(
         return 0.0
     if any(following.source_in < previous.source_out for previous, following in zip(segments, segments[1:])):
         return 0.0
+    original_range = (
+        len(segments) == 1
+        and abs(segments[0].source_in - candidate.source_start) <= 0.001
+        and abs(segments[0].source_out - candidate.source_end) <= 0.001
+    )
     if primary is None:
-        return 1.0 if len(segments) == 1 and segments[0].source_in == candidate.source_start and segments[0].source_out == candidate.source_end else 0.65
+        return 1.0 if original_range else 0.65
     anchored = [segment for segment in segments if segment.source_in <= primary.source_time <= segment.source_out]
     if not anchored:
         return 0.0
     anchor_segment = anchored[0]
+    if original_range:
+        return 1.0
     setup = _clamp((primary.source_time - anchor_segment.source_in) / 1.5)
     tail = _clamp((anchor_segment.source_out - primary.source_time) / 1.0)
+    if setup < 1.0 or tail < 1.0:
+        return 0.0
     duration = _clamp(sum(segment.duration for segment in segments) / 3.0)
     fragmentation = 0.15 * max(0, len(segments) - 1)
     return round(_clamp(0.45 + 0.20 * setup + 0.20 * tail + 0.15 * duration - fragmentation), 6)
@@ -121,11 +131,17 @@ def build_condensed_variants(
     candidate: Candidate, events: Sequence[PayoffEvent], music: MusicAnalysis, config: PipelineConfig
 ) -> list[CandidateVariant]:
     primary, secondary = select_anchors(events, candidate.source_start, candidate.source_end, music, config)
+    original_segments = (SourceSegment(candidate.source_file, candidate.source_start, candidate.source_end, candidate.duration),)
     if candidate.duration > 12.0 and primary is not None:
-        segments = (_continuous_anchor_window(candidate, primary),)
-        rationale = "Continuous anchor-centered range retains setup, action, payoff, and resolution tail."
+        condensed_segments = (_continuous_anchor_window(candidate, primary),)
+        if context_integrity_score(candidate, primary, condensed_segments) >= config.minimum_context_integrity:
+            segments = condensed_segments
+            rationale = "Continuous anchor-centered range retains setup, action, payoff, and resolution tail."
+        else:
+            segments = original_segments
+            rationale = "Original continuous source range retained because the boundary anchor cannot preserve setup and payoff tail."
     else:
-        segments = (SourceSegment(candidate.source_file, candidate.source_start, candidate.source_end, candidate.duration),)
+        segments = original_segments
         rationale = "Original continuous source range retained because safe condensation was not proven."
     integrity = context_integrity_score(candidate, primary, segments)
     if integrity < config.minimum_context_integrity:
@@ -134,11 +150,10 @@ def build_condensed_variants(
     payoff_score = max((event.strength for event in included_events), default=0.0)
     danger = max((event.evidence.get("damage_border_change", 0.0) for event in included_events), default=0.0)
     action_density = _clamp((candidate.combat_intensity + candidate.motion_score + candidate.audio_score) / 3.0)
-    features = {
-        "motion": candidate.motion_score,
-        "visual_novelty": candidate.visual_score,
-        "danger_escalation": danger,
-    }
+    features = dict(candidate.feature_runs)
+    features.setdefault("motion", candidate.motion_score)
+    features.setdefault("visual_novelty", candidate.visual_score)
+    features["danger_escalation"] = max(float(features.get("danger_escalation", 0.0)), danger)
     penalties = calculate_penalties(features, included_events, config)
     variant = CandidateVariant(
         variant_id=_variant_id(candidate, segments), parent_candidate_id=candidate.candidate_id,
