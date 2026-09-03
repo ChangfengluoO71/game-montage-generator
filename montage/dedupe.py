@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import replace
+from math import ceil
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
@@ -59,7 +60,13 @@ def fingerprint_candidate(candidate: Candidate, source_for_analysis: Path, toolc
 
 
 def _expected_fingerprint_count(variant: CandidateVariant, interval: float) -> int:
-    return sum(max(2, min(16, int(segment.duration / interval) + 1)) for segment in variant.source_segments)
+    return sum(_fingerprint_sample_count(segment.duration, interval) for segment in variant.source_segments)
+
+
+def _fingerprint_sample_count(duration: float, interval: float) -> int:
+    if duration <= 0:
+        return 0
+    return max(1, min(16, ceil(duration / interval)))
 
 
 def _is_complete_fingerprint(value: object, expected_count: int) -> bool:
@@ -73,7 +80,7 @@ def _is_complete_fingerprint(value: object, expected_count: int) -> bool:
 def _fingerprint_segment(
     source_for_analysis: Path, start: float, duration: float, interval: float, toolchain: Toolchain
 ) -> list[int]:
-    sample_count = max(2, min(16, int(duration / interval) + 1))
+    sample_count = _fingerprint_sample_count(duration, interval)
     result = subprocess.run(
         [
             str(toolchain.ffmpeg), "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}",

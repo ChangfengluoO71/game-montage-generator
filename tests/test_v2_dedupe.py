@@ -199,6 +199,25 @@ def _filesystem_variant(tmp_path):
     )
 
 
+def test_fingerprint_accepts_and_caches_end_exclusive_frame_count(tmp_path, base_config, fake_toolchain, monkeypatch):
+    filesystem_item = _filesystem_variant(tmp_path)
+    item = replace(
+        filesystem_item,
+        duration=6.0,
+        source_segments=(SourceSegment(filesystem_item.source_file, 0.0, 6.0, 6.0),),
+    )
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    monkeypatch.setattr(
+        "montage.dedupe.subprocess.run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": bytes(3 * 32 * 32), "stderr": b""})(),
+    )
+
+    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [0, 0, 0]
+    cache_files = list((config.cache_dir / "dedupe_v2").glob("*.json"))
+    assert len(cache_files) == 1
+    assert json.loads(cache_files[0].read_text(encoding="utf-8"))["data"] == [0, 0, 0]
+
+
 def test_fingerprint_rejects_ffmpeg_failure_without_caching(tmp_path, base_config, fake_toolchain, monkeypatch):
     item = _filesystem_variant(tmp_path)
     config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
@@ -217,10 +236,10 @@ def test_fingerprint_rejects_truncated_ffmpeg_output_without_caching(tmp_path, b
     config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
     monkeypatch.setattr(
         "montage.dedupe.subprocess.run",
-        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": bytes(2 * 32 * 32), "stderr": b""})(),
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": bytes(32 * 32), "stderr": b""})(),
     )
 
-    with pytest.raises(RuntimeError, match="expected 3 frames"):
+    with pytest.raises(RuntimeError, match="expected 2 frames"):
         fingerprint_variant(item, item.source_file, fake_toolchain, config)
     assert not list((config.cache_dir / "dedupe_v2").glob("*.json"))
 
@@ -238,13 +257,13 @@ def test_stale_or_corrupt_fingerprint_cache_is_rebuilt(tmp_path, base_config, fa
     )
     cache_path = config.cache_dir / "dedupe_v2" / f"{key}.json"
     cache_path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
-    monkeypatch.setattr("montage.dedupe._fingerprint_segment", lambda *args: [123, 456, 789])
+    monkeypatch.setattr("montage.dedupe._fingerprint_segment", lambda *args: [123, 456])
 
-    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [123, 456, 789]
-    assert read_cached_json(cache_path, key) == [123, 456, 789]
+    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [123, 456]
+    assert read_cached_json(cache_path, key) == [123, 456]
 
 
-@pytest.mark.parametrize("cached_data", [[], [123, 456]])
+@pytest.mark.parametrize("cached_data", [[], [123]])
 def test_keyed_empty_or_truncated_fingerprint_cache_is_rebuilt(tmp_path, base_config, fake_toolchain, monkeypatch, cached_data):
     item = _filesystem_variant(tmp_path)
     config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
@@ -258,11 +277,11 @@ def test_keyed_empty_or_truncated_fingerprint_cache_is_rebuilt(tmp_path, base_co
     cache_path = config.cache_dir / "dedupe_v2" / f"{key}.json"
     cache_path.write_text(json.dumps({"cache_key": key, "data": cached_data}), encoding="utf-8")
     calls = []
-    monkeypatch.setattr("montage.dedupe._fingerprint_segment", lambda *args: (calls.append(args) or [123, 456, 789]))
+    monkeypatch.setattr("montage.dedupe._fingerprint_segment", lambda *args: (calls.append(args) or [123, 456]))
 
-    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [123, 456, 789]
+    assert fingerprint_variant(item, item.source_file, fake_toolchain, config) == [123, 456]
     assert len(calls) == 1
-    assert read_cached_json(cache_path, key) == [123, 456, 789]
+    assert read_cached_json(cache_path, key) == [123, 456]
 
 
 def test_fingerprint_enforces_raw_source_match_and_work_cache_boundary(tmp_path, base_config, fake_toolchain, monkeypatch):
