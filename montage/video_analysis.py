@@ -183,6 +183,45 @@ def _smooth(values: np.ndarray, width: int) -> np.ndarray:
     return np.convolve(values, kernel, mode="same")
 
 
+def _longest_run_ratio(mask: np.ndarray) -> float:
+    if mask.size == 0:
+        return 0.0
+    longest = current = 0
+    for value in mask.tolist():
+        current = current + 1 if value else 0
+        longest = max(longest, current)
+    return float(longest / mask.size)
+
+
+def derive_candidate_feature_runs(
+    times: Sequence[float], motion: Sequence[float], visual: Sequence[float], audio: Sequence[float],
+    continuity: Sequence[float], activity: Sequence[float], start: float, end: float,
+) -> dict[str, float]:
+    """Derive compact V2 temporal-run diagnostics from existing low-rate analysis."""
+    clock = np.asarray(list(times), dtype=float)
+    size = min(clock.size, len(motion), len(visual), len(audio), len(continuity), len(activity))
+    if size == 0:
+        return {}
+    selected = (clock[:size] >= start) & (clock[:size] <= end)
+    if not np.any(selected):
+        return {}
+    movement = np.clip(np.asarray(motion[:size], dtype=float)[selected], 0.0, 1.0)
+    novelty = np.clip(np.asarray(visual[:size], dtype=float)[selected], 0.0, 1.0)
+    audio_activity = np.clip(np.asarray(audio[:size], dtype=float)[selected], 0.0, 1.0)
+    continuity_values = np.clip(np.asarray(continuity[:size], dtype=float)[selected], 0.0, 1.0)
+    intensity = np.clip(np.asarray(activity[:size], dtype=float)[selected], 0.0, 1.0)
+    same_view = (movement <= 0.25) & (novelty <= 0.30)
+    return {
+        "stationary_ads": round(_longest_run_ratio(same_view & (audio_activity >= 0.35) & (continuity_values >= 0.40)), 6),
+        "same_view": round(_longest_run_ratio(same_view), 6),
+        "downtime": round(_longest_run_ratio((intensity <= 0.25) & (audio_activity <= 0.30)), 6),
+        "repetitive_fire": round(_longest_run_ratio((audio_activity >= 0.65) & (movement <= 0.50) & (novelty <= 0.55)), 6),
+        "danger_escalation": round(_longest_run_ratio((intensity >= 0.75) & (movement >= 0.55)), 6),
+        "motion": round(float(np.mean(movement)), 6),
+        "visual_novelty": round(float(np.mean(novelty)), 6),
+    }
+
+
 def analyze_video_activity(
     record: MediaRecord,
     source_for_analysis: Path,
@@ -238,7 +277,14 @@ def analyze_video_activity(
         brightness=brightness,
         black_ratio=black_ratio,
         entropy=entropy,
-        candidate_windows=[{"start": start, "end": end} for start, end in windows],
+        candidate_windows=[
+            {
+                "start": start,
+                "end": end,
+                **derive_candidate_feature_runs(times, motion, visual, audio, continuity, activity, start, end),
+            }
+            for start, end in windows
+        ],
     )
 
 

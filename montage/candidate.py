@@ -14,6 +14,7 @@ import numpy as np
 from .cache import atomic_write_bytes
 from .config import PipelineConfig, is_within, load_config
 from .models import Candidate, CandidateVariant, MediaRecord, VideoAnalysis
+from .video_analysis import derive_candidate_feature_runs
 
 
 def _candidate_id(source: Path, start: float, end: float) -> str:
@@ -89,12 +90,17 @@ _FEATURE_RUN_NAMES = {
 }
 
 
-def _feature_runs(window: Mapping[str, float]) -> dict[str, float]:
-    return {
+def _feature_runs(window: Mapping[str, float], analysis: VideoAnalysis, start: float, end: float) -> dict[str, float]:
+    values = derive_candidate_feature_runs(
+        analysis.times, analysis.motion, analysis.visual, analysis.audio,
+        analysis.continuity, analysis.activity, start, end,
+    )
+    values.update({
         name: float(value)
         for name, value in window.items()
         if name in _FEATURE_RUN_NAMES and isinstance(value, (int, float))
-    }
+    })
+    return values
 
 
 def generate_candidates(
@@ -108,7 +114,7 @@ def generate_candidates(
         if analysis is None:
             continue
         if record.duration <= config.short_clip_threshold:
-            windows = [(0.0, record.duration, {})]
+            windows = [(0.0, record.duration, _feature_runs({}, analysis, 0.0, record.duration))]
             human_prior = 0.42
         else:
             core_windows = [
@@ -119,14 +125,11 @@ def generate_candidates(
             if not core_windows:
                 fallback = _fallback_window(analysis, record.duration, config)
                 core_windows = [{"start": fallback[0], "end": fallback[1]}] if fallback else []
-            windows = [
-                (
-                    max(0.0, float(window["start"]) - config.pre_roll),
-                    min(record.duration, float(window["end"]) + config.post_roll),
-                    _feature_runs(window),
-                )
-                for window in core_windows
-            ]
+            windows = []
+            for window in core_windows:
+                start = max(0.0, float(window["start"]) - config.pre_roll)
+                end = min(record.duration, float(window["end"]) + config.post_roll)
+                windows.append((start, end, _feature_runs(window, analysis, start, end)))
             human_prior = 0.0
         for start, end, feature_runs in windows:
             if end - start < max(1.0, config.highlight_min_duration):

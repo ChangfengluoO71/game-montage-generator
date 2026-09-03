@@ -9,8 +9,9 @@ from montage.condense import (
     context_integrity_score,
     select_anchors,
 )
+from montage.candidate import generate_candidates, write_candidates
 from montage.config import load_config
-from montage.models import Candidate, CandidateVariant, MusicAnalysis, PayoffEvent, SourceSegment
+from montage.models import Candidate, CandidateVariant, MediaRecord, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
 from montage.ranking import calculate_penalties, score_variant
 
 
@@ -159,6 +160,48 @@ def test_generated_variant_uses_explicit_feature_runs_for_penalties():
     assert with_payoff.penalty_values["stationary_ads_penalty"] < no_payoff.penalty_values["stationary_ads_penalty"]
     assert with_payoff.penalty_values["downtime_penalty"] < no_payoff.penalty_values["downtime_penalty"]
     assert with_payoff.penalty_values["repetitive_fire_penalty"] < no_payoff.penalty_values["repetitive_fire_penalty"]
+
+
+def test_normal_activity_window_derives_runs_that_reach_variant_penalties():
+    source = Path("normal-window.mp4")
+    record = MediaRecord(
+        file_path=source, file_name=source.name, file_size=1, duration=120.0, width=1920, height=1200,
+        fps=60.0, codec="h264", bitrate=None, audio_codec=None, audio_channels=None,
+        audio_sample_rate=None, creation_time=None, category="long", fingerprint={},
+    )
+    analysis = VideoAnalysis(
+        source_file=source, sample_rate=1.0, times=[float(index) for index in range(12)],
+        motion=[0.1] * 9 + [0.9] * 3,
+        visual=[0.1] * 9 + [0.9] * 3,
+        audio=[0.8] * 3 + [0.1] * 3 + [0.8] * 3 + [0.1] * 3,
+        continuity=[0.8] * 12,
+        activity=[0.2] * 3 + [0.1] * 3 + [0.3] * 3 + [0.9] * 3,
+        candidate_windows=[{"start": 4.0, "end": 10.0}],
+    )
+
+    candidate = generate_candidates([record], {str(source): analysis}, test_config())[0]
+    variant = build_condensed_variants(candidate, [], make_music(), test_config())[0]
+
+    assert candidate.feature_runs["stationary_ads"] > 0.0
+    assert candidate.feature_runs["downtime"] > 0.0
+    assert candidate.feature_runs["same_view"] > 0.0
+    assert candidate.feature_runs["repetitive_fire"] > 0.0
+    assert variant.penalty_values["stationary_ads_penalty"] > 0.0
+    assert variant.penalty_values["downtime_penalty"] > 0.0
+    assert variant.penalty_values["same_view_penalty"] > 0.0
+    assert variant.penalty_values["repetitive_fire_penalty"] > 0.0
+
+
+def test_v1_candidate_writer_excludes_v2_feature_runs(tmp_path):
+    candidate = replace(make_long_candidate(), feature_runs={"stationary_ads": 0.9})
+    json_path = tmp_path / "v1-candidates.json"
+    csv_path = tmp_path / "v1-candidates.csv"
+
+    write_candidates([candidate], json_path, csv_path)
+
+    assert "feature_runs" not in candidate.to_dict()
+    assert "feature_runs" not in json_path.read_text(encoding="utf-8")
+    assert "feature_runs" not in csv_path.read_text(encoding="utf-8-sig")
 
 
 def test_variant_scoring_uses_all_configured_v11_components_and_penalties():

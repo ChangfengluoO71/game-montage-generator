@@ -103,6 +103,12 @@ class Candidate(Serializable):
     rationale: str = ""
     feature_runs: dict[str, float] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Keep V2-only temporal diagnostics out of legacy Candidate artifacts."""
+        payload = super().to_dict()
+        payload.pop("feature_runs", None)
+        return payload
+
     @property
     def human_selection_prior(self) -> float:
         return self.human_selection_score
