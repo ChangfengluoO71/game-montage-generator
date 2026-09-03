@@ -183,6 +183,10 @@ class PipelineConfig:
         return self.work_dir / "cache"
 
     @property
+    def render_v2_dir(self) -> Path:
+        return self.cache_dir / "render_v2"
+
+    @property
     def highlights_dir(self) -> Path:
         return self.work_dir / "highlights"
 
