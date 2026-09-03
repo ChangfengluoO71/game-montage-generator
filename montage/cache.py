@@ -49,6 +49,34 @@ def v2_cache_key(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def v2_variant_fingerprint_cache_key(
+    source_fingerprint: dict[str, object],
+    *,
+    variant_id: str,
+    parent_candidate_id: str,
+    ranges: list[tuple[float, float]],
+    interval: float,
+    detector_version: str,
+    ffmpeg_version: str,
+    ffmpeg_path: str,
+) -> str:
+    """Return the stable identity for one V2 variant fingerprint calculation."""
+    return v2_cache_key(
+        source_fingerprint,
+        "variant_fingerprint_v2",
+        {
+            "stage_version": "v2-dedupe-fingerprint-1",
+            "ffmpeg_version": ffmpeg_version,
+            "ffmpeg_path": ffmpeg_path,
+            "variant_id": variant_id,
+            "parent_candidate_id": parent_candidate_id,
+            "ranges": [[float(start), float(end)] for start, end in ranges],
+            "interval": float(interval),
+            "detector_version": detector_version,
+        },
+    )
+
+
 def baseline_manifest(path: Path) -> dict[str, object]:
     resolved = path.resolve(strict=True)
     stat = resolved.stat()
@@ -95,7 +123,7 @@ def read_cached_json(path: Path, expected_key: str) -> Any | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if value.get("cache_key") != expected_key:
+    if not isinstance(value, dict) or value.get("cache_key") != expected_key:
         return None
     return value.get("data")
 

@@ -214,6 +214,8 @@ class CandidateVariant(Serializable):
     condense_reason: str
     rationale: str
     score_components: dict[str, float] = field(default_factory=dict)
+    rapid_multikill_score: float = 0.0
+    rapid_multikill_bonus: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.source_segments:
@@ -302,3 +304,23 @@ class V2EditDecisionList(Serializable):
 class DedupeResult(Serializable):
     groups: list[list[Candidate]]
     similarity: dict[str, float]
+
+
+@dataclass(frozen=True)
+class V2DedupeResult(Serializable):
+    """Auditable duplicate decisions for immutable condensed variants."""
+
+    groups: tuple[tuple[CandidateVariant, ...], ...]
+    similarity: Mapping[str, float]
+    threshold: float
+    representative_ids: Mapping[str, Mapping[str, str]]
+    forced_source_overlap_reasons: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "similarity", MappingProxyType(dict(self.similarity)))
+        object.__setattr__(
+            self,
+            "representative_ids",
+            MappingProxyType({key: MappingProxyType(dict(value)) for key, value in self.representative_ids.items()}),
+        )
+        object.__setattr__(self, "forced_source_overlap_reasons", MappingProxyType(dict(self.forced_source_overlap_reasons)))

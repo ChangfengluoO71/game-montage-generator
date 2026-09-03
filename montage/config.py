@@ -66,6 +66,9 @@ class PipelineConfig:
     audio_overlap_ms: tuple[int, int]
     impact_tail_max_ms: int
     minimum_context_integrity: float
+    rapid_multikill_window_s: float
+    rapid_multikill_min_events: int
+    rapid_multikill_bonus_weight: float
     v2_weights: dict[str, float]
     beam_weights: dict[str, float]
     penalty_weights: dict[str, float]
@@ -248,6 +251,9 @@ def load_config(path: Path) -> PipelineConfig:
         audio_overlap_ms=tuple(int(v) for v in raw.get("audio_overlap_ms", [100, 250])),
         impact_tail_max_ms=int(raw.get("impact_tail_max_ms", 400)),
         minimum_context_integrity=float(raw.get("minimum_context_integrity", 0.70)),
+        rapid_multikill_window_s=float(raw.get("rapid_multikill_window_s", 4.0)),
+        rapid_multikill_min_events=int(raw.get("rapid_multikill_min_events", 2)),
+        rapid_multikill_bonus_weight=float(raw.get("rapid_multikill_bonus_weight", 0.12)),
         v2_weights=v2_weights,
         beam_weights=beam_weights,
         penalty_weights=penalty_weights,

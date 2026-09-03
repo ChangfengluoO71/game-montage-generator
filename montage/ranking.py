@@ -9,6 +9,9 @@ from .config import PipelineConfig
 from .models import Candidate, CandidateVariant, PayoffEvent
 
 
+RAPID_MULTIKILL_MAX_BONUS = 0.12
+
+
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -74,6 +77,23 @@ def calculate_penalties(
     }
 
 
+def rapid_multikill_score(events: Sequence[PayoffEvent], config: PipelineConfig) -> float:
+    """Return the capped payoff score for distinct rapid kill/multikill events."""
+    qualifying = sorted(
+        {event.event_id: event for event in events if event.type in {"kill", "multikill"}}.values(),
+        key=lambda event: event.source_time,
+    )
+    minimum = max(2, int(config.rapid_multikill_min_events))
+    window = float(config.rapid_multikill_window_s)
+    if window <= 0 or len(qualifying) < minimum:
+        return 0.0
+    best_count = 0
+    for start, event in enumerate(qualifying):
+        count = sum(candidate.source_time - event.source_time <= window for candidate in qualifying[start:])
+        best_count = max(best_count, count)
+    return round(_clamp(best_count / minimum) if best_count >= minimum else 0.0, 6)
+
+
 def score_variant(variant: CandidateVariant, config: PipelineConfig) -> CandidateVariant:
     """Apply the configured V1.1 weighted score and subtract explicit diagnostics."""
     values = {
@@ -90,10 +110,15 @@ def score_variant(variant: CandidateVariant, config: PipelineConfig) -> Candidat
     }
     weighted = {name: round(_clamp(value) * float(config.v2_weights.get(name, 0.0)), 6) for name, value in values.items()}
     penalties = {name: _clamp(value) for name, value in variant.penalty_values.items()}
-    components = {**weighted, **penalties}
-    final_score = _clamp(sum(weighted.values()) - sum(penalties.values()))
+    rapid_score = rapid_multikill_score(variant.payoff_events, config)
+    configured_bonus = max(0.0, min(RAPID_MULTIKILL_MAX_BONUS, float(config.rapid_multikill_bonus_weight)))
+    rapid_bonus = round(min(configured_bonus, rapid_score * configured_bonus), 6)
+    components = {**weighted, **penalties, "rapid_multikill_score": rapid_score, "rapid_multikill_bonus": rapid_bonus}
+    final_score = _clamp(sum(weighted.values()) + rapid_bonus - sum(penalties.values()))
     return replace(
         variant,
         final_score=round(final_score, 6),
         score_components=components,
+        rapid_multikill_score=rapid_score,
+        rapid_multikill_bonus=rapid_bonus,
     )

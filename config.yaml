@@ -44,6 +44,9 @@ baseline_music_max_shift: 0.5
 audio_overlap_ms: [100, 250]
 impact_tail_max_ms: 400
 minimum_context_integrity: 0.70
+rapid_multikill_window_s: 4.0
+rapid_multikill_min_events: 2
+rapid_multikill_bonus_weight: 0.12
 v2_weights:
   payoff_score: 0.25
   human_selection_prior: 0.15
