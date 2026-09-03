@@ -52,6 +52,8 @@ def _validate_destination(destination: Path, config: PipelineConfig, *, final: b
 
 
 def _probe_source_duration(source: Path, toolchain: Toolchain) -> float:
+    if not source.exists() or not source.is_file():
+        raise ValueError(f"V2 source is not a regular file: {source}")
     result = run_command(
         [
             toolchain.ffprobe, "-hide_banner", "-loglevel", "error",
@@ -152,23 +154,22 @@ def _validate_rendered_v2_output(
 
 
 def _preflight_v2_sources(edit: V2EditDecisionList, config: PipelineConfig, toolchain: Toolchain) -> None:
-    requested_out: dict[Path, float] = {}
+    requested_ranges: dict[Path, list[tuple[float, float]]] = {}
     for shot in edit.shots:
-        requested_out[shot.source.resolve(strict=False)] = max(
-            requested_out.get(shot.source.resolve(strict=False), 0.0), shot.source_out
-        )
+        key = shot.source.resolve(strict=False)
+        requested_ranges.setdefault(key, []).append((shot.source_in, shot.source_out))
         for segment in shot.source_segments:
             key = segment.source.resolve(strict=False)
-            requested_out[key] = max(requested_out.get(key, 0.0), segment.source_out)
+            requested_ranges.setdefault(key, []).append((segment.source_in, segment.source_out))
 
-    for source, source_out in requested_out.items():
+    for source, ranges in requested_ranges.items():
         assert_source_read_only(source, config.raw_dir)
         actual_duration = _probe_source_duration(source, toolchain)
-        if source_out > actual_duration + 0.02:
-            raise ValueError(
-                f"V2 source range exceeds probed duration for {source}: "
-                f"source_out={source_out:.3f}, duration={actual_duration:.3f}"
-            )
+        for source_in, source_out in ranges:
+            if not math.isfinite(source_in) or not math.isfinite(source_out) or source_in < 0 or source_out <= source_in:
+                raise ValueError(f"V2 source range is invalid for {source}")
+            if source_out > actual_duration + 0.02:
+                raise ValueError(f"V2 source range exceeds probed duration for {source}: source_out={source_out:.3f}, duration={actual_duration:.3f}")
 
 
 def compile_v2_segment_argv(

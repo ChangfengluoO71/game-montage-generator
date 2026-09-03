@@ -12,10 +12,18 @@
 ## Results
 
 - Focused Task 9 and related checks: passed.
-- Full regression suite: 159 passed.
+- Full regression suite: 164 passed (the prior 159 count was stale).
 - `compileall -q .`: passed.
 - `git diff --check`: passed.
 - No real media, render, or full-output command was run.
+
+## Replacement-fix coverage
+
+- Normalized all music evidence to the zero-based EDL edit clock and made dense-shot labels compact/staggered.
+- Added explicit V1/V2/delta comparison records for shot, duration, source, anchor, sync, transition, stationarity, downtime, repetition, recent-source, rejection, and rapid-multikill diagnostics while retaining V2 top-level keys.
+- Passed cached or freshly computed per-source audio evidence into payoff detection.
+- Reloaded cached payoff events and dedupe diagnostics on variant-cache hits without overwriting them with empty values.
+- Strengthened V2 source preflight/verification to probe each distinct regular source with selected ffprobe, require finite duration and audio/video streams, validate every range, and retain RAW/baseline integrity checks.
 
 ## Commit hash
 

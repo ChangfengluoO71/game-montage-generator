@@ -12,6 +12,7 @@ from montage.v2_renderer import (
     compile_v2_segment_argv,
     render_v2_edit,
 )
+from montage.v2_renderer import _preflight_v2_sources
 
 
 def _shot(source: Path, index: int, *, impact=False, compatibility=0.9) -> V2EditShot:
@@ -173,6 +174,25 @@ def test_renderer_preflights_all_sources_with_selected_ffprobe_before_rendering(
     assert len(commands) == 2
     assert commands[0][0] == str(fake_toolchain.ffprobe)
     assert commands[1][0] == str(fake_toolchain.ffprobe)
+
+
+def test_preflight_probes_each_distinct_source(tmp_path, base_config, fake_toolchain, monkeypatch):
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    source_a = config.raw_dir / "a.mp4"
+    source_b = config.raw_dir / "b.mp4"
+    source_a.parent.mkdir(parents=True)
+    source_a.write_bytes(b"a")
+    source_b.write_bytes(b"b")
+    music = tmp_path / "music.flac"
+    edit = _edit(source_a, music)
+    second = replace(edit.shots[1], source=source_b,
+                     source_segments=(SourceSegment(source_b, 5.0, 10.0, 5.0),))
+    edit = replace(edit, shots=(edit.shots[0], second, *edit.shots[2:]))
+    probed = []
+    monkeypatch.setattr("montage.v2_renderer._probe_source_duration",
+                        lambda source, toolchain: probed.append(source) or 100.0)
+    _preflight_v2_sources(edit, config, fake_toolchain)
+    assert {path.resolve() for path in probed} == {source_a.resolve(), source_b.resolve()}
 
 
 def _render_with_fake_toolchain(monkeypatch, config, toolchain, edit, *, output_duration):

@@ -49,7 +49,7 @@ from montage.payoff_detection import detect_payoff_events, ocr_available, write_
 from montage.candidate import write_v2_candidates
 from montage.timeline_visualization import render_v2_timeline_plot
 from montage.v2_report import build_v2_sync_report, render_v2_markdown_report, write_v2_report
-from montage.v2_renderer import render_v2_edit
+from montage.v2_renderer import _preflight_v2_sources, render_v2_edit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -321,6 +321,49 @@ def _load_v2_variants(config: PipelineConfig) -> list[CandidateVariant]:
     return [_variant_from_dict(row) for row in rows]
 
 
+def _load_cached_payoff_events(config: PipelineConfig) -> list[PayoffEvent]:
+    if not config.payoff_events_v2_path.exists():
+        return []
+    payload = json.loads(config.payoff_events_v2_path.read_text(encoding="utf-8"))
+    rows = payload.get("events") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise RuntimeError("cached payoff_events_v2.json has invalid events")
+    if isinstance(payload, dict) and payload.get("event_count") not in (None, len(rows)):
+        raise RuntimeError("cached payoff_events_v2.json has an inconsistent event count")
+    if any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError("cached payoff_events_v2.json contains an invalid event")
+    return [_event_from_dict(row) for row in rows]
+
+
+def _cached_audio_evidence(config: PipelineConfig, candidate: Candidate, records: list[MediaRecord],
+                           toolchain: Toolchain) -> dict[str, Any]:
+    """Load the V1 per-source audio cache, computing it only when absent."""
+    record = next((item for item in records if item.file_path.resolve(strict=False) == candidate.source_file.resolve(strict=False)), None)
+    source = record.file_path if record is not None else candidate.source_file
+    if record is not None and record.duration > config.long_clip_threshold:
+        proxies = sorted(config.proxy_dir.glob(f"*_{record.file_path.stem}.mp4"))
+        if proxies:
+            source = proxies[0]
+    parameters = {
+        "analysis_fps": config.analysis_fps,
+        "sample_rate": config.analysis_sample_rate,
+        "source_for_analysis": str(source),
+        "ffmpeg_version": toolchain.ffmpeg_version,
+    }
+    fingerprint = record.fingerprint if record is not None else file_fingerprint(source)
+    key = cache_key(fingerprint, "video_analysis", parameters)
+    audio_cache = config.analysis_dir / f"audio_{key[:20]}.json"
+    cached = read_cached_json(audio_cache, key)
+    if isinstance(cached, dict) and cached.get("times") is not None:
+        return cached
+    wav_path = config.cache_dir / f"{key[:20]}_payoff_audio.wav"
+    extract_analysis_audio(source, wav_path, toolchain, config.analysis_sample_rate)
+    samples, sample_rate = sf.read(str(wav_path), dtype="float32", always_2d=False)
+    evidence = analyze_audio_waveform(samples, sample_rate)
+    write_cached_json(audio_cache, key, evidence)
+    return evidence
+
+
 def _write_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
     atomic_write_json(config.preview_v2_edit_path, edit.to_dict())
     config.preview_v2_timeline_path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,8 +414,10 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
                 analysis = analyses.get(str(candidate.source_file))
                 if analysis is None:
                     continue
+                records = _load_records(config.analysis_dir / "media_index.json") if (config.analysis_dir / "media_index.json").exists() else []
+                audio_evidence = _cached_audio_evidence(config, candidate, records, toolchain)
                 found = detect_payoff_events(candidate.source_file, candidate.source_start, candidate.source_end,
-                                             analysis, {}, config, toolchain)
+                                             analysis, audio_evidence, config, toolchain)
                 events.extend(found)
                 variants.extend(build_condensed_variants(candidate, found, music, config))
             if variants:
@@ -388,14 +433,22 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
         else:
             dedupe = None
     else:
+        events = _load_cached_payoff_events(config)
         dedupe = None
-    write_payoff_events(events, config.payoff_events_v2_path)
+        if config.dedupe_summary_v2_path.exists():
+            cached_dedupe = json.loads(config.dedupe_summary_v2_path.read_text(encoding="utf-8"))
+            if not isinstance(cached_dedupe, dict):
+                raise RuntimeError("cached dedupe_summary_v2.json is invalid")
+            dedupe = cached_dedupe
+    if not variants or not config.payoff_events_v2_path.exists():
+        write_payoff_events(events, config.payoff_events_v2_path, config)
     if not variants:
         raise RuntimeError("V2 candidate variants are unavailable; run V1 analysis artifacts first")
     edit = build_v2_preview_edit(variants, music, baseline, config)
     validate_v2_edit(edit, config)
     _write_v2_edit(edit, config)
-    report = build_v2_sync_report(edit, baseline, variants, rejected)
+    report = build_v2_sync_report(edit, baseline, variants, rejected,
+                                  lookback_window=config.recent_source_window)
     write_v2_report(report, config.preview_v2_sync_report_path)
     render_v2_timeline_plot(edit, music, config.preview_v2_timeline_image_path)
     raw_after = _raw_manifest(config)
@@ -433,11 +486,16 @@ def verify_preview_v2(config: PipelineConfig) -> int:
         toolchain = discover_toolchain(config)
         edit = _v2_edit_from_dict(json.loads(config.preview_v2_edit_path.read_text(encoding="utf-8")))
         validate_v2_edit(edit, config)
+        _preflight_v2_sources(edit, config, toolchain)
         probe = probe_output(config.v2_output_path, toolchain)
         decode = run_command([toolchain.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", config.v2_output_path,
                               "-map", "0", "-f", "null", "NUL"], check=False)
         baseline = json.loads(config.baseline_manifest_v2_path.read_text(encoding="utf-8"))
         assert_baseline_unchanged(baseline, config.baseline_output_path)
+        raw_before_path = config.analysis_dir / "raw_manifest_v2_before.json"
+        raw_integrity = True
+        if raw_before_path.exists():
+            raw_integrity = _raw_manifest(config) == json.loads(raw_before_path.read_text(encoding="utf-8"))
         full_outputs = [config.output_dir / "fast_montage.mp4", config.output_dir / "full_highlights.mp4"]
         shot_groups = [shot.duplicate_group for shot in edit.shots if shot.duplicate_group]
         ranges_valid = all(shot.source_in >= 0 and shot.source_out > shot.source_in and shot.duration > 0 for shot in edit.shots)
@@ -446,11 +504,12 @@ def verify_preview_v2(config: PipelineConfig) -> int:
         cadence_valid = abs(float(probe.get("fps", 0.0)) - config.target_fps) <= max(0.5, config.target_fps * 0.02)
         valid = bool(probe.get("has_video") and probe.get("has_audio") and int(probe.get("width", 0)) == config.output_width
                      and int(probe.get("height", 0)) == config.output_height and 45.0 <= float(probe.get("duration", 0.0)) <= 60.0
-                     and cadence_valid and ranges_valid and integrity_valid and dedupe_valid
+                     and cadence_valid and ranges_valid and integrity_valid and dedupe_valid and raw_integrity
                      and decode.returncode == 0 and not any(path.exists() for path in full_outputs))
         print(json.dumps({"valid": valid, "probe": probe, "decode_returncode": decode.returncode,
                           "checks": {"cadence": cadence_valid, "ranges": ranges_valid,
                                      "dedupe": dedupe_valid, "integrity": integrity_valid,
+                                     "raw_integrity": raw_integrity,
                                      "full_outputs_absent": not any(path.exists() for path in full_outputs)}},
                          ensure_ascii=False, indent=2))
         return 0 if valid else 1

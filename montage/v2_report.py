@@ -36,47 +36,87 @@ def _ratio(variants: Sequence[CandidateVariant], key: str) -> float:
     return statistics.fmean(values) if values else 0.0
 
 
-def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
-                         variants: Sequence[CandidateVariant], rejected: dict[str, int]) -> dict[str, object]:
+def _metric_pair(v1: object, v2: object) -> dict[str, object]:
+    if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+        return {"v1": v1, "v2": v2, "delta": float(v2) - float(v1)}
+    return {"v1": v1, "v2": v2, "delta": None}
+
+
+def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookback_window: int = 2) -> dict[str, object]:
     durations = _shot_durations(edit)
-    event = _stats(_sync_values(edit, "event_sync_offset"))
-    cut = _stats(_sync_values(edit, "cut_sync_offset"))
-    anchors = [shot.primary_anchor for shot in edit.shots if shot.primary_anchor is not None]
-    unique_sources = {str(shot.source.resolve(strict=False)) for shot in edit.shots}
-    hero_count = sum(1 for shot in edit.shots if (shot.anchor_event_type or "").lower() in {"hero", "hero_play"})
-    strong_count = sum(1 for shot in edit.shots if (shot.music_event_type or "") in {"strong_beat", "downbeat"}
-                       or (shot.primary_anchor is not None and shot.primary_anchor.strength >= 0.75))
-    same_env = sum(1 for left, right in zip(edit.shots, edit.shots[1:])
-                   if left.environment_signature and left.environment_signature == right.environment_signature)
-    same_source_recent = sum(1 for left, right in zip(edit.shots, edit.shots[1:])
-                             if left.source_signature and left.source_signature == right.source_signature)
-    rapid_scores = [float(getattr(variant, "rapid_multikill_score", 0.0)) for variant in variants]
-    report: dict[str, object] = {
-        "report_version": "v2-sync-1",
-        "diagnostic_evidence": True,
-        "baseline_music_range": [float(baseline.music_in), float(baseline.music_out)],
-        "v2_music_range": [float(edit.music_in), float(edit.music_out)],
-        "macro_shot_count": len(edit.shots),
+    shots = list(getattr(edit, "shots", ()))
+    event = _stats([getattr(shot, "event_sync_offset", getattr(shot, "sync_offset", 0.0)) for shot in shots])
+    cut = _stats([getattr(shot, "cut_sync_offset", getattr(shot, "sync_offset", 0.0)) for shot in shots])
+    sources = {str(shot.source.resolve(strict=False)) for shot in shots}
+    anchors = [shot.primary_anchor for shot in shots if getattr(shot, "primary_anchor", None) is not None]
+    strong = sum(1 for shot in shots if getattr(shot, "primary_anchor", None) is not None and
+                 shot.primary_anchor.strength >= 0.75)
+    same_env = sum(1 for left, right in zip(shots, shots[1:])
+                   if getattr(left, "environment_signature", "") and
+                   left.environment_signature == getattr(right, "environment_signature", ""))
+    # A source is recent when it occurred anywhere in the configured two-shot lookback,
+    # rather than only in the immediately preceding shot.
+    same_source_recent = sum(
+        1 for index, shot in enumerate(shots)
+        if getattr(shot, "source_signature", "") and any(
+            shot.source_signature == getattr(previous, "source_signature", "")
+            for previous in shots[max(0, index - max(1, int(lookback_window))):index]
+        )
+    )
+    return {
+        "macro_shot_count": len(shots),
         "average_shot_duration": statistics.fmean(durations) if durations else 0.0,
         "median_shot_duration": statistics.median(durations) if durations else 0.0,
-        "unique_source_count": len(unique_sources),
-        "hero_shot_count": hero_count,
+        "unique_source_count": len(sources),
+        "hero_shot_count": sum(1 for shot in shots if (getattr(shot, "anchor_event_type", "") or "").lower() in {"hero", "hero_play"}),
         "payoff_anchor_count": len(anchors),
-        "strong_anchor_count": strong_count,
+        "strong_anchor_count": strong,
         "event_sync_mean": event["mean"], "event_sync_median": event["median"],
         "event_sync_P90": event["P90"], "event_sync_P95": event["P95"],
         "cut_sync_mean": cut["mean"], "cut_sync_median": cut["median"],
         "cut_sync_P90": cut["P90"], "cut_sync_P95": cut["P95"],
         "transition_compatibility_mean": statistics.fmean(
-            [float(getattr(shot, "transition_compatibility_score", 0.0)) for shot in edit.shots]
-        ) if edit.shots else 0.0,
+            [float(getattr(shot, "transition_compatibility_score", 0.0)) for shot in shots]
+        ) if shots else 0.0,
         "stationary_ads_duration_ratio": _ratio(variants, "stationary_ads"),
         "estimated_downtime_ratio": _ratio(variants, "downtime"),
+        "repetitive_fire_ratio": _ratio(variants, "repetitive_fire"),
         "same_environment_consecutive_count": same_env,
         "same_source_recent_penalty_count": same_source_recent,
+    }
+
+
+def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
+                         variants: Sequence[CandidateVariant], rejected: dict[str, int],
+                         *, lookback_window: int = 2) -> dict[str, object]:
+    rapid_scores = [float(getattr(variant, "rapid_multikill_score", 0.0)) for variant in variants]
+    v2 = _edit_metrics(edit, variants=variants, lookback_window=lookback_window)
+    v1 = _edit_metrics(baseline, lookback_window=lookback_window)
+    comparison_keys = tuple(v2)
+    comparisons = {key: _metric_pair(v1[key], v2[key]) for key in comparison_keys}
+    comparisons["music_range"] = {
+        "v1": [float(baseline.music_in), float(baseline.music_out)],
+        "v2": [float(edit.music_in), float(edit.music_out)],
+        "delta": [float(edit.music_in - baseline.music_in), float(edit.music_out - baseline.music_out)],
+    }
+    rejected_metrics = {
         "rejected_by_stationary_ads": int(rejected.get("stationary_ads", rejected.get("rejected_by_stationary_ads", 0))),
         "rejected_by_downtime": int(rejected.get("downtime", rejected.get("rejected_by_downtime", 0))),
         "rejected_by_no_payoff": int(rejected.get("no_payoff", rejected.get("rejected_by_no_payoff", 0))),
+    }
+    comparisons.update({key: _metric_pair(0, value) for key, value in rejected_metrics.items()})
+    for key, value in rejected.items():
+        normalized = str(key)
+        comparison_name = normalized if normalized.startswith("rejected_by_") else f"rejected_by_{normalized}"
+        comparisons.setdefault(comparison_name, _metric_pair(0, int(value)))
+    report: dict[str, object] = {
+        "report_version": "v2-sync-1",
+        "diagnostic_evidence": True,
+        "baseline_music_range": [float(baseline.music_in), float(baseline.music_out)],
+        "v2_music_range": [float(edit.music_in), float(edit.music_out)],
+        **v2,
+        **rejected_metrics,
+        "comparisons": comparisons,
         "rejections": {str(key): int(value) for key, value in rejected.items()},
         "dedupe": {"unique_duplicate_groups": len({shot.duplicate_group for shot in edit.shots if shot.duplicate_group}),
                     "selected_shots": len(edit.shots)},
@@ -89,6 +129,9 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
                     "Phrase and section labels are heuristic.",
                     "Event and cut sync statistics are reported separately."],
     }
+    for key, pair in comparisons.items():
+        report[f"v1_{key}"] = pair["v1"]
+        report[f"delta_{key}"] = pair["delta"]
     return report
 
 

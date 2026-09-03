@@ -1,7 +1,10 @@
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import main
 from montage.models import (
+    Candidate,
     EditDecisionList,
     EditShot,
     MusicAnalysis,
@@ -67,6 +70,12 @@ def test_report_contains_baseline_and_event_metrics(tmp_path):
     assert "rejected_by_stationary_ads" in report
     assert "rapid_multikill" in report
     assert report["diagnostic_evidence"] is True
+    assert report["comparisons"]["macro_shot_count"] == {"v1": 0, "v2": 1, "delta": 1}
+    assert report["comparisons"]["event_sync_P95"]["v1"] == 0.0
+    assert "v1_macro_shot_count" in report
+    assert "delta_macro_shot_count" in report
+    assert report["comparisons"]["music_range"]["delta"] == [0.0, 0.0]
+    assert report["comparisons"]["rejected_by_stationary_ads"]["v1"] == 0
 
 
 def test_plot_is_created_below_work(tmp_path):
@@ -76,7 +85,54 @@ def test_plot_is_created_below_work(tmp_path):
     assert path.stat().st_size > 0
 
 
+def test_plot_normalizes_music_source_times_to_edit_time(tmp_path, monkeypatch):
+    edit = _v2_edit(tmp_path)
+    captured = []
+
+    def record_markers(values, label, color, axis):
+        captured.append((label, list(values)))
+
+    monkeypatch.setattr("montage.timeline_visualization._markers", record_markers)
+    render_v2_timeline_plot(edit, _music(), tmp_path / "normalized.png")
+    assert next(values for label, values in captured if label == "beat") == [1.0, 2.0, 3.0]
+
+
 def test_baseline_edit_shot_shape_remains_supported():
     shot = EditShot(Path("clip.mp4"), 0.0, 4.0, 4.0, 0.8, None, 0.0, 4.0, "hard_cut", 20.0, "beat", 0.0, "ok")
     assert _baseline().shots == []
     assert shot.duration == 4.0
+
+
+def test_cached_payoff_events_are_loaded_without_being_replaced(tmp_path):
+    config = main.load_config(Path(__file__).parents[1] / "config.yaml")
+    event = _event("cached", "multikill", 4.0)
+    config = replace(config, work_dir=tmp_path, raw_dir=tmp_path / "raw")
+    config.analysis_dir.mkdir(parents=True, exist_ok=True)
+    path = config.payoff_events_v2_path
+    path.write_text(json.dumps({"events": [event.to_dict()], "event_count": 1}), encoding="utf-8")
+    loaded = main._load_cached_payoff_events(config)
+    assert loaded[0].event_id == "cached"
+    assert path.read_text(encoding="utf-8").count("cached") == 1
+
+
+def test_report_counts_same_source_penalties_across_configured_lookback(tmp_path):
+    edit = _v2_edit(tmp_path)
+    shots = tuple(replace(shot, source_signature="same" if index in {0, 2} else f"other-{index}")
+                  for index, shot in enumerate((edit.shots[0], edit.shots[0], edit.shots[0])))
+    edit = replace(edit, shots=shots, duration=12.0)
+    report = build_v2_sync_report(edit, _baseline(), [], {}, lookback_window=2)
+    assert report["same_source_recent_penalty_count"] == 1
+
+
+def test_cached_audio_helper_returns_per_source_evidence(tmp_path, monkeypatch, fake_toolchain):
+    config = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"),
+                     work_dir=tmp_path, raw_dir=tmp_path / "raw")
+    source = config.raw_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    candidate = Candidate("c1", source, 0.0, 4.0, 4.0, 0.5, 0.5, 0.5, 0.5, 0.5)
+    monkeypatch.setattr(main, "extract_analysis_audio", lambda *args, **kwargs: args[1])
+    monkeypatch.setattr(main.sf, "read", lambda *args, **kwargs: ([0.1, 0.2], 22050))
+    monkeypatch.setattr(main, "analyze_audio_waveform", lambda *args: {"times": [0.0], "onset_strength": [0.9]})
+    evidence = main._cached_audio_evidence(config, candidate, [], fake_toolchain)
+    assert evidence["onset_strength"] == [0.9]
