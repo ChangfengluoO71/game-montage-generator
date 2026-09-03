@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, Sequence
@@ -115,6 +116,55 @@ def _decode_grayscale_frames(source: Path, record: MediaRecord, fps: float, tool
     if return_code != 0:
         raise RuntimeError(f"Video decode failed for {source}: {stderr[-500:]}")
     return frames, fps
+
+
+def decode_color_frames(
+    source: Path,
+    fps: float,
+    toolchain: Toolchain,
+    source_start: float = 0.0,
+    source_end: float | None = None,
+    width: int = 320,
+) -> list[np.ndarray]:
+    """Decode a source-time window as low-rate RGB frames with the selected toolchain."""
+    probe = subprocess.run(
+        [
+            str(toolchain.ffprobe), "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "json", str(source),
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(f"Video probe failed for payoff detection: {source}")
+    streams = json.loads(probe.stdout).get("streams") or []
+    if not streams:
+        return []
+    source_width = max(1, int(streams[0]["width"]))
+    source_height = max(1, int(streams[0]["height"]))
+    height = max(2, int(round((source_height / source_width) * width / 2.0) * 2))
+    frame_size = width * height * 3
+    argv: list[str] = [str(toolchain.ffmpeg), "-hide_banner", "-loglevel", "error"]
+    if source_start > 0:
+        argv.extend(["-ss", f"{source_start:.6f}"])
+    argv.extend(["-i", str(source)])
+    if source_end is not None:
+        argv.extend(["-t", f"{max(0.0, source_end - source_start):.6f}"])
+    argv.extend([
+        "-vf", f"fps={fps},scale={width}:{height}:flags=fast_bilinear", "-an", "-sn", "-dn",
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+    ])
+    process = subprocess.Popen(argv, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    frames: list[np.ndarray] = []
+    assert process.stdout is not None
+    while True:
+        chunk = process.stdout.read(frame_size)
+        if len(chunk) != frame_size:
+            break
+        frames.append(np.frombuffer(chunk, dtype=np.uint8).reshape(height, width, 3).copy())
+    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    if process.wait() != 0:
+        raise RuntimeError(f"Payoff video decode failed for {source}: {stderr[-500:]}")
+    return frames
 
 
 def _align_feature(times: np.ndarray, feature: dict[str, Any], key: str) -> np.ndarray:

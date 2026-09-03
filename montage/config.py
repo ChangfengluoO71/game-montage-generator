@@ -50,6 +50,8 @@ class PipelineConfig:
     baseline_music_out: float
     v2_output_name: str
     payoff_analysis_fps: float
+    payoff_detector_version: str
+    payoff_evidence_threshold: float
     event_merge_window_ms: int
     strong_anchor_threshold: float
     weak_anchor_threshold: float
@@ -229,6 +231,8 @@ def load_config(path: Path) -> PipelineConfig:
         baseline_music_out=float(raw.get("baseline_music_out", 74.252)),
         v2_output_name=str(raw.get("v2_output_name", "preview_60s_v2.mp4")),
         payoff_analysis_fps=float(raw.get("payoff_analysis_fps", 6.0)),
+        payoff_detector_version=str(raw.get("payoff_detector_version", "payoff-v2")),
+        payoff_evidence_threshold=float(raw.get("payoff_evidence_threshold", 0.35)),
         event_merge_window_ms=int(raw.get("event_merge_window_ms", 700)),
         strong_anchor_threshold=float(raw.get("strong_anchor_threshold", 0.75)),
         weak_anchor_threshold=float(raw.get("weak_anchor_threshold", 0.55)),

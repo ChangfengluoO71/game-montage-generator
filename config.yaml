@@ -28,6 +28,8 @@ baseline_music_in: 19.0
 baseline_music_out: 74.252
 v2_output_name: preview_60s_v2.mp4
 payoff_analysis_fps: 6.0
+payoff_detector_version: payoff-v2
+payoff_evidence_threshold: 0.35
 event_merge_window_ms: 700
 strong_anchor_threshold: 0.75
 weak_anchor_threshold: 0.55
@@ -64,11 +66,11 @@ penalty_weights:
   no_payoff: 1.0
   repetitive_fire: 1.0
 roi_profile:
-  version: 1
-  reward_score: [0.0, 0.0, 1.0, 1.0]
-  kill_feed: [0.0, 0.0, 1.0, 0.2]
-  crosshair: [0.4, 0.25, 0.6, 0.75]
-  objective: [0.0, 0.0, 1.0, 0.25]
+  version: 2
+  reward_score: [0.35, 0.04, 0.65, 0.26]
+  kill_feed: [0.68, 0.03, 0.99, 0.35]
+  crosshair: [0.43, 0.34, 0.57, 0.66]
+  objective: [0.25, 0.0, 0.75, 0.18]
   damage_border: [0.0, 0.0, 1.0, 1.0]
 
 weights:

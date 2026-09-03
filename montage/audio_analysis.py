@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -93,4 +93,29 @@ def analyze_audio_waveform(samples: np.ndarray, sample_rate: int) -> dict[str, A
         "onset_strength": flux_norm.tolist(),
         "transient_density": density.tolist(),
         "audio_activity": activity.tolist(),
+    }
+
+
+def nearest_audio_evidence(audio: Mapping[str, Sequence[float]], source_time: float) -> dict[str, float]:
+    """Return normalized transient, loudness, and impact evidence nearest a source time."""
+    times = np.asarray(audio.get("times") or [], dtype=float)
+    if times.size == 0:
+        return {"audio_transient": 0.0, "audio_rms": 0.0, "audio_impact": 0.0}
+    index = int(np.argmin(np.abs(times - float(source_time))))
+
+    def value_for(*keys: str) -> float:
+        for key in keys:
+            values = np.asarray(audio.get(key) or [], dtype=float)
+            if values.size:
+                value = float(values[min(index, values.size - 1)])
+                low, high = np.percentile(values, [5, 95])
+                if high > low + 1e-12:
+                    value = (value - float(low)) / float(high - low)
+                return float(np.clip(value, 0.0, 1.0))
+        return 0.0
+
+    return {
+        "audio_transient": value_for("onset_strength", "transient_density"),
+        "audio_rms": value_for("rms", "audio_activity"),
+        "audio_impact": value_for("impact", "spectral_flux", "peak"),
     }
