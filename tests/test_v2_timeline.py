@@ -1,7 +1,11 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from montage.models import BoundaryDescriptor, CandidateVariant, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
+from montage.models import EditDecisionList, V2EditDecisionList
+from montage.beam_timeline import BeamState, build_v2_preview_edit, expand_beam, validate_v2_edit
 from montage.transitions import (
     choose_anchor_music_target,
     choose_v2_transition,
@@ -182,3 +186,91 @@ def test_v2_transition_is_hard_cut_with_impact_metadata_only(tmp_path):
     assert decision.effect in {None, "impact_flash"}
     assert decision.audio_j_cut_ms >= 0
     assert decision.audio_l_cut_ms >= 0
+
+
+def timeline_variant(tmp_path: Path, index: int, *, duration: float = 6.0, quality: float = 0.8,
+                     duplicate_group: str | None = None, environment: str | None = None,
+                     anchor_type: str = "kill") -> CandidateVariant:
+    raw = tmp_path / "raw"
+    source = raw / f"clip-{index}.mp4"
+    segment = SourceSegment(source, 0.0, duration, duration)
+    payoff = event(f"payoff-{index}", anchor_type, duration - 1.0, strength=quality)
+    return replace(
+        variant(tmp_path, anchor=payoff, signature=environment or f"env-{index}"),
+        variant_id=f"v-{index}", parent_candidate_id=f"c-{index}", source_file=source,
+        source_segments=(segment,), duration=duration, human_selection_prior=quality,
+        payoff_score=quality, combat_intensity=quality, action_density=quality,
+        continuity=quality, visual_novelty=quality, motion=quality, audio_activity=quality,
+        danger_score=quality, final_score=quality, duplicate_group=duplicate_group,
+        environment_signature=environment or f"env-{index}",
+        rationale=f"payoff {anchor_type} setup action payoff tail",
+    )
+
+
+def baseline_edit_for_timeline() -> EditDecisionList:
+    return EditDecisionList("preview", Path("music.wav"), 19.0, 74.252, 55.252, "locked", [])
+
+
+def test_v2_beam_builds_bounded_payoff_aware_edit(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    variants = [timeline_variant(tmp_path, index) for index in range(10)]
+
+    edit = build_v2_preview_edit(variants, music(), baseline_edit_for_timeline(), config)
+
+    assert 8 <= len(edit.shots) <= 14
+    assert 45.0 <= edit.duration <= 60.0
+    assert len({shot.duplicate_group for shot in edit.shots}) == len(edit.shots)
+    assert edit.shots[-1].primary_anchor is not None
+    assert edit.shots[-1].anchor_event_type == "kill"
+    assert (config.preview_v2_edit_path).exists()
+    assert (config.preview_v2_timeline_path).exists()
+
+
+def test_v2_validation_rejects_repeated_duplicate_groups_and_bad_ranges(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    first = timeline_variant(tmp_path, 1)
+    shot = first
+    from montage.models import V2EditShot
+    edit_shot = V2EditShot(
+        source=first.source_file, source_in=0.0, source_out=first.duration,
+        duration=first.duration, candidate_score=first.final_score,
+        duplicate_group="dg-1", timeline_in=0.0, timeline_out=first.duration,
+        transition="hard_cut", music_target=20.0, music_event_type="beat",
+        sync_offset=0.0, rationale="setup action payoff tail", source_segments=first.source_segments,
+        parent_candidate_id=first.parent_candidate_id, variant_id=first.variant_id,
+        payoff_events=first.payoff_events, primary_anchor=first.primary_anchor,
+        anchor_event_time=first.anchor_event_time, anchor_event_type=first.anchor_event_type,
+        anchor_event_strength=first.anchor_event_strength, anchor_event_confidence=first.anchor_event_confidence,
+    )
+    edit = V2EditDecisionList("preview_v2", Path("music.wav"), 19.0, 74.252, 19.0, 74.252,
+                              55.0, "locked", tuple(edit_shot for _ in range(8)))
+
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_v2_edit(edit, config)
+
+    bad_segment = SourceSegment(first.source_file, 0.0, first.duration, first.duration)
+    bad = replace(edit_shot, source_in=-1.0, source_segments=(bad_segment,))
+    invalid = replace(edit, shots=tuple([bad] + [edit_shot] * 7))
+    with pytest.raises(ValueError, match="range"):
+        validate_v2_edit(invalid, config)
+
+
+def test_beam_penalizes_recent_source_and_environment_reuse(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    repeated = replace(timeline_variant(tmp_path, 1), source_signature="source-a", environment_signature="env-a")
+    fresh = replace(timeline_variant(tmp_path, 2), source_signature="source-b", environment_signature="env-b")
+    state = BeamState(recent_sources=("source-a",), recent_environments=("env-a",))
+
+    expanded = expand_beam(state, [repeated, fresh], music(), config)
+
+    assert expanded[0].shots[0].variant_id == "v-2"
+
+
+def test_finale_prefers_hero_play_when_quality_is_comparable(tmp_path, base_config):
+    config = replace(base_config, raw_dir=tmp_path / "raw")
+    regular = [timeline_variant(tmp_path, index, quality=0.80) for index in range(9)]
+    hero = timeline_variant(tmp_path, 99, quality=0.79, anchor_type="hero_play")
+
+    edit = build_v2_preview_edit(regular + [hero], music(), baseline_edit_for_timeline(), config)
+
+    assert edit.shots[-1].anchor_event_type == "hero_play"
