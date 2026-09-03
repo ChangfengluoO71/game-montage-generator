@@ -218,6 +218,35 @@ def test_fingerprint_accepts_and_caches_end_exclusive_frame_count(tmp_path, base
     assert json.loads(cache_files[0].read_text(encoding="utf-8"))["data"] == [0, 0, 0]
 
 
+def test_fingerprint_trims_and_pads_terminal_frame_for_fractional_duration(
+    tmp_path, base_config, fake_toolchain, monkeypatch
+):
+    item = _filesystem_variant(tmp_path)
+    item = replace(
+        item,
+        duration=10.242,
+        source_segments=(SourceSegment(item.source_file, 0.0, 10.242, 10.242),),
+    )
+    config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return type("Result", (), {"returncode": 0, "stdout": bytes(6 * 32 * 32), "stderr": b""})()
+
+    monkeypatch.setattr("montage.dedupe.subprocess.run", fake_run)
+
+    assert len(fingerprint_variant(item, item.source_file, fake_toolchain, config)) == 6
+    command = calls[0]
+    assert "-t" not in command
+    assert "-frames:v" in command and command[command.index("-frames:v") + 1] == "6"
+    filter_graph = command[command.index("-vf") + 1]
+    assert "trim=duration=10.242" in filter_graph
+    assert "setpts=PTS-STARTPTS" in filter_graph
+    assert "fps=0.5" in filter_graph
+    assert "tpad=stop_mode=clone:stop_duration=2" in filter_graph
+
+
 def test_fingerprint_rejects_ffmpeg_failure_without_caching(tmp_path, base_config, fake_toolchain, monkeypatch):
     item = _filesystem_variant(tmp_path)
     config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")

@@ -84,8 +84,13 @@ def _fingerprint_segment(
     result = subprocess.run(
         [
             str(toolchain.ffmpeg), "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}",
-            "-i", str(source_for_analysis), "-t", f"{duration:.3f}",
-            "-vf", f"fps={1.0 / interval},scale=32:32:flags=fast_bilinear,format=gray",
+            "-i", str(source_for_analysis),
+            "-vf",
+            (
+                f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,fps={1.0 / interval},"
+                f"tpad=stop_mode=clone:stop_duration={interval:g},"
+                "scale=32:32:flags=fast_bilinear,format=gray"
+            ),
             "-frames:v", str(sample_count), "-f", "rawvideo", "pipe:1",
         ],
         shell=False,
