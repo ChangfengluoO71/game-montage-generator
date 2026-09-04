@@ -86,6 +86,9 @@ def test_audio_filter_has_smooth_ducking_and_never_mutes_gameplay():
     graph = build_v2_audio_filter("game", "music", 0.0, -9.0, duration=45.0)
     assert "sidechaincompress" in graph
     assert "attack=50" in graph and "release=500" in graph
+    assert "asplit=2" in graph
+    assert "[game_sidechain]" in graph and "[game_mix]" in graph
+    assert "duration=longest" in graph
     assert "amix=inputs=2" in graph
     assert "volume=0dB" not in graph
 

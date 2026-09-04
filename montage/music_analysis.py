@@ -581,7 +581,10 @@ def analyze_music_v2(
         "baseline_music_in": baseline_edit.music_in,
         "baseline_music_out": baseline_edit.music_out,
         "baseline_music_max_shift": config.baseline_music_max_shift,
-        "window_policy_version": "confidence-supported-boundaries-v2",
+        "window_policy_version": "confidence-supported-boundaries-v3",
+        "window_policy": config.v2_music_window_policy,
+        "preview_min_duration": config.preview_min_duration,
+        "preview_max_duration": config.preview_max_duration,
     }
     key = v2_cache_key(file_fingerprint(config.music_file), "music_analysis_v2", parameters)
     artifact_paths = (
@@ -644,7 +647,22 @@ def analyze_music_v2(
         "onset": float(structure.get("onset_confidence", 0.0)),
         "percussive": percussive_stability,
     }
-    decision = choose_v2_music_window(structure, baseline_edit.music_in, baseline_edit.music_out, duration, config.baseline_music_max_shift)
+    if config.v2_music_window_policy == "representative":
+        preview_in, preview_out, preview_reason = choose_preview_music_window(
+            structure, duration, config.preview_min_duration, config.preview_max_duration
+        )
+        decision = MusicWindowDecision(
+            baseline_music_in=float(baseline_edit.music_in),
+            baseline_music_out=float(baseline_edit.music_out),
+            v2_music_in=preview_in,
+            v2_music_out=preview_out,
+            changed=True,
+            reason=preview_reason,
+        )
+    else:
+        decision = choose_v2_music_window(
+            structure, baseline_edit.music_in, baseline_edit.music_out, duration, config.baseline_music_max_shift
+        )
     analysis = MusicAnalysis(
         source_file=config.music_file,
         duration=duration,

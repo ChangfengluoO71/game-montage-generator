@@ -233,6 +233,32 @@ def test_v2_beam_builds_bounded_payoff_aware_edit(tmp_path, base_config):
     assert (config.preview_v2_timeline_path).exists()
 
 
+def test_long_profile_uses_representative_music_window_and_configured_shot_cap(tmp_path, base_config):
+    config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        preview_min_duration=75.0,
+        preview_max_duration=90.0,
+        v2_max_shots=18,
+        v2_music_window_policy="representative",
+    )
+    representative_music = replace(
+        music(),
+        preview_music_in=5.5,
+        preview_music_out=95.5,
+        preview_reason="representative build-to-chorus structure",
+    )
+    variants = [timeline_variant(tmp_path, index, duration=5.0) for index in range(18)]
+
+    edit = build_v2_preview_edit(variants, representative_music, baseline_edit_for_timeline(), config)
+
+    assert 75.0 <= edit.duration <= 90.0
+    assert len(edit.shots) <= 18
+    assert (edit.music_in, edit.music_out) == (5.5, 95.5)
+    assert edit.music_reason == "representative build-to-chorus structure"
+
+
 def test_v2_shot_rationale_records_placement_context(tmp_path, base_config):
     config = replace(base_config, raw_dir=tmp_path / "raw", work_dir=tmp_path / "work")
     candidate = timeline_variant(tmp_path, 1)

@@ -111,10 +111,10 @@ def test_rapid_multikill_bonus_is_capped_and_serialized_as_score_components():
 
     assert rapid_multikill_score(events, config.rapid_multikill_window_s, config.rapid_multikill_min_events) == 1.0
     assert scored.score_components["rapid_multikill_score"] == 1.0
-    assert scored.score_components["rapid_multikill_bonus"] == 0.12
+    assert scored.score_components["rapid_multikill_bonus"] == 0.18
     payload = scored.to_dict()
     assert payload["rapid_multikill_score"] == 1.0
-    assert payload["rapid_multikill_bonus"] == 0.12
+    assert payload["rapid_multikill_bonus"] == 0.18
     assert scored.final_score > base.final_score
 
 
@@ -183,7 +183,7 @@ def test_score_audit_fields_are_written_to_json_and_csv(tmp_path):
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     csv_payload = csv_path.read_text(encoding="utf-8-sig")
     assert payload["candidates"][0]["rapid_multikill_score"] == 1.0
-    assert payload["candidates"][0]["rapid_multikill_bonus"] == 0.12
+    assert payload["candidates"][0]["rapid_multikill_bonus"] == 0.18
     assert "rapid_multikill_score" in csv_payload
     assert "rapid_multikill_bonus" in csv_payload
 

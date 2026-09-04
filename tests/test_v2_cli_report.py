@@ -94,6 +94,7 @@ def test_v2_commands_are_exposed():
     parser = main.build_parser()
     choices = parser._subparsers._group_actions[0].choices
     assert {"all-v2", "render-preview-v2", "verify-preview-v2"} <= set(choices)
+    assert {"all-v2-long", "render-preview-v2-long", "verify-preview-v2-long"} <= set(choices)
 
 
 def test_report_contains_baseline_and_event_metrics(tmp_path):

@@ -37,12 +37,13 @@ def build_v2_audio_filter(
         raise ValueError("audio duration must be positive")
     return (
         f"[{game_label}]aresample=48000,volume={game_gain_db:.3f}dB[game_bus];"
+        "[game_bus]asplit=2[game_sidechain][game_mix];"
         f"[{music_label}]aresample=48000,atrim=duration={duration:.3f},"
         f"volume={music_gain_db:.3f}dB[music_bus];"
-        "[music_bus][game_bus]sidechaincompress="
+        "[music_bus][game_sidechain]sidechaincompress="
         f"threshold=0.035:ratio=4.0:attack={int(attack_ms)}:release={int(release_ms)}:"
         "makeup=1:mix=1[ducked_music];"
-        "[game_bus][ducked_music]amix=inputs=2:duration=first:"
+        "[game_mix][ducked_music]amix=inputs=2:duration=longest:"
         "dropout_transition=0:normalize=0,"
         f"loudnorm=I={target_lufs:.1f}:TP={true_peak_db:.1f},"
         "aresample=48000:async=1:first_pts=0,atrim=duration="

@@ -49,8 +49,19 @@ impact_tail_max_ms: 400
 minimum_context_integrity: 0.70
 rapid_multikill_window_s: 4.0
 rapid_multikill_min_events: 2
-rapid_multikill_bonus_weight: 0.12
+rapid_multikill_bonus_weight: 0.18
 hero_quality_margin: 0.05
+v2_max_shots: 14
+v2_music_window_policy: baseline
+v2_excluded_ranges:
+  - source_name: 'Battlefield 6 2026.09.03 - 14.43.43.02.DVR.mp4'
+    start: 49.0
+    end: 55.0
+    reason: training_range
+  - source_name: 'Battlefield 6 2026.09.03 - 14.43.43.02.DVR.mp4'
+    start: 68.667
+    end: 74.667
+    reason: training_range
 v2_weights:
   payoff_score: 0.25
   human_selection_prior: 0.15

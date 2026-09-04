@@ -127,19 +127,83 @@ def _continuous_anchor_window(candidate: Candidate, anchor: PayoffEvent) -> Sour
     return SourceSegment(candidate.source_file, round(start, 3), round(end, 3), round(end - start, 3))
 
 
+def _best_rapid_window(
+    candidate: Candidate, events: Sequence[PayoffEvent], config: PipelineConfig
+) -> tuple[SourceSegment, tuple[PayoffEvent, ...]] | None:
+    """Find the strongest compact kill sequence and keep it as one continuous range."""
+    qualifying = sorted(
+        {event.event_id: event for event in events if event.type in {"kill", "multikill"}}.values(),
+        key=lambda event: (event.source_time, event.event_id),
+    )
+    minimum = max(2, int(config.rapid_multikill_min_events))
+    window = float(config.rapid_multikill_window_s)
+    if window <= 0.0 or len(qualifying) < minimum:
+        return None
+
+    clusters: list[tuple[tuple[float, float, float, float, str], tuple[PayoffEvent, ...]]] = []
+    for start_index, first in enumerate(qualifying):
+        cluster = tuple(
+            event for event in qualifying[start_index:]
+            if event.source_time - first.source_time <= window + 1e-9
+        )
+        if len(cluster) < minimum:
+            continue
+        span = cluster[-1].source_time - cluster[0].source_time
+        strength = sum(float(event.strength) for event in cluster)
+        # Prefer more kills, then stronger evidence, then a tighter sequence; the
+        # final timestamp/event id tie-breaks keep cache output deterministic.
+        key = (float(len(cluster)), strength, -span, -cluster[-1].source_time, cluster[0].event_id)
+        clusters.append((key, cluster))
+    if not clusters:
+        return None
+
+    _, cluster = max(clusters, key=lambda item: item[0])
+    start = max(candidate.source_start, cluster[0].source_time - 1.0)
+    end = min(candidate.source_end, cluster[-1].source_time + 1.0)
+    if end <= start:
+        return None
+    segment = SourceSegment(
+        candidate.source_file,
+        round(start, 3),
+        round(end, 3),
+        round(end - start, 3),
+    )
+    return segment, cluster
+
+
 def build_condensed_variants(
     candidate: Candidate, events: Sequence[PayoffEvent], music: MusicAnalysis, config: PipelineConfig
 ) -> list[CandidateVariant]:
     primary, secondary = select_anchors(events, candidate.source_start, candidate.source_end, music, config)
     original_segments = (SourceSegment(candidate.source_file, candidate.source_start, candidate.source_end, candidate.duration),)
-    if candidate.duration > 12.0 and primary is not None:
-        condensed_segments = (_continuous_anchor_window(candidate, primary),)
-        if context_integrity_score(candidate, primary, condensed_segments) >= config.minimum_context_integrity:
-            segments = condensed_segments
-            rationale = "Continuous anchor-centered range retains setup, action, payoff, and resolution tail."
+    if candidate.duration > 12.0:
+        rapid = _best_rapid_window(candidate, events, config)
+        if rapid is not None:
+            rapid_segment, rapid_events = rapid
+            rapid_primary, rapid_secondary = select_anchors(
+                rapid_events, rapid_segment.source_in, rapid_segment.source_out, music, config
+            )
+            if rapid_primary is not None and context_integrity_score(candidate, rapid_primary, (rapid_segment,)) >= config.minimum_context_integrity:
+                primary, secondary = rapid_primary, rapid_secondary
+                segments = (rapid_segment,)
+                rationale = (
+                    "Tight continuous rapid-kill sequence retains the transfer, successive kills, "
+                    "and short resolution tail."
+                )
+            else:
+                segments = original_segments
+                rationale = "Original continuous source range retained because the rapid-kill context could not be proven safe."
+        elif primary is not None:
+            condensed_segments = (_continuous_anchor_window(candidate, primary),)
+            if context_integrity_score(candidate, primary, condensed_segments) >= config.minimum_context_integrity:
+                segments = condensed_segments
+                rationale = "Continuous anchor-centered range retains setup, action, payoff, and resolution tail."
+            else:
+                segments = original_segments
+                rationale = "Original continuous source range retained because the boundary anchor cannot preserve setup and payoff tail."
         else:
             segments = original_segments
-            rationale = "Original continuous source range retained because the boundary anchor cannot preserve setup and payoff tail."
+            rationale = "Original continuous source range retained because safe condensation was not proven."
     else:
         segments = original_segments
         rationale = "Original continuous source range retained because safe condensation was not proven."

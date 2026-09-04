@@ -11,7 +11,7 @@ import statistics
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,7 @@ from montage.condense import build_condensed_variants
 from montage.dedupe import deduplicate_variants, fingerprint_variant, write_v2_dedupe_summary
 from montage.beam_timeline import build_v2_preview_edit, validate_v2_edit
 from montage.payoff_detection import detect_payoff_events, ocr_available, write_payoff_events
+from montage.curation import event_is_editorially_excluded, variant_is_editorially_excluded
 from montage.candidate import write_v2_candidates
 from montage.timeline_visualization import render_v2_timeline_plot
 from montage.v2_report import build_v2_sync_report, render_v2_markdown_report, write_v2_report
@@ -397,7 +398,7 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
         {"inputs": _v2_cache_inputs(config)},
         "v2_variants_and_events",
         {
-            "stage_version": "v2-aggregate-artifacts-3",
+            "stage_version": "v2-aggregate-artifacts-4",
             "ffmpeg_version": toolchain.ffmpeg_version,
             "detector_version": config.payoff_detector_version,
             "payoff_analysis_fps": config.payoff_analysis_fps,
@@ -406,6 +407,7 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
             "weak_anchor_threshold": config.weak_anchor_threshold,
             "payoff_evidence_threshold": config.payoff_evidence_threshold,
             "long_clip_threshold": config.long_clip_threshold,
+            "v2_excluded_ranges": [list(item) for item in config.v2_excluded_ranges],
             "roi_profile": {
                 str(name): [float(value) for value in bounds]
                 if isinstance(bounds, (list, tuple)) else bounds
@@ -559,9 +561,21 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
                 audio_evidence = _cached_audio_evidence(config, candidate, records, toolchain)
                 found = detect_payoff_events(candidate.source_file, candidate.source_start, candidate.source_end,
                                              analysis, audio_evidence, config, toolchain)
+                excluded_events = [
+                    event for event in found
+                    if event_is_editorially_excluded(event, candidate.source_file, config)
+                ]
+                if excluded_events:
+                    rejected["editorial_exclusion"] = rejected.get("editorial_exclusion", 0) + len(excluded_events)
+                found = [event for event in found if event not in excluded_events]
                 events.extend(found)
                 generated = build_condensed_variants(candidate, found, music, config)
-                variants.extend(_score_v2_variants(generated, config))
+                excluded_variants = [variant for variant in generated if variant_is_editorially_excluded(variant, config)]
+                if excluded_variants:
+                    rejected["editorial_exclusion"] = rejected.get("editorial_exclusion", 0) + len(excluded_variants)
+                variants.extend(_score_v2_variants(
+                    [variant for variant in generated if variant not in excluded_variants], config
+                ))
             if variants:
                 fingerprints = {variant.variant_id: fingerprint_variant(variant, variant.source_file, toolchain, config)
                                 for variant in variants}
@@ -650,7 +664,8 @@ def verify_preview_v2(config: PipelineConfig) -> int:
         dedupe_valid = len(shot_groups) == len(set(shot_groups))
         cadence_valid = abs(float(probe.get("fps", 0.0)) - config.target_fps) <= max(0.5, config.target_fps * 0.02)
         valid = bool(probe.get("has_video") and probe.get("has_audio") and int(probe.get("width", 0)) == config.output_width
-                     and int(probe.get("height", 0)) == config.output_height and 45.0 <= float(probe.get("duration", 0.0)) <= 60.0
+                     and int(probe.get("height", 0)) == config.output_height
+                     and config.preview_min_duration <= float(probe.get("duration", 0.0)) <= config.preview_max_duration
                      and cadence_valid and ranges_valid and integrity_valid and dedupe_valid and raw_integrity
                      and decode.returncode == 0 and not any(path.exists() for path in full_outputs))
         print(json.dumps({"valid": valid, "probe": probe, "decode_returncode": decode.returncode,
@@ -976,13 +991,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Battlefield gameplay-aware highlight montage pipeline")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("index", "analyze-video", "analyze-music", "candidates", "review", "render-preview", "render-fast", "render-full", "verify-preview", "render-preview-v2", "verify-preview-v2"):
+    for command in ("index", "analyze-video", "analyze-music", "candidates", "review", "render-preview", "render-fast", "render-full", "verify-preview", "render-preview-v2", "verify-preview-v2", "render-preview-v2-long", "verify-preview-v2-long"):
         subparsers.add_parser(command)
     all_parser = subparsers.add_parser("all")
     all_parser.add_argument("--dry-run", action="store_true", help="run analysis and EDL generation without rendering video")
     all_v2_parser = subparsers.add_parser("all-v2")
     all_v2_parser.add_argument("--dry-run", action="store_true", help="run V2 analysis and EDL generation without rendering video")
+    all_v2_long_parser = subparsers.add_parser("all-v2-long")
+    all_v2_long_parser.add_argument("--dry-run", action="store_true", help="run the 75-90 second V2 analysis and EDL without rendering video")
     return parser
+
+
+def _long_v2_config(config: PipelineConfig) -> PipelineConfig:
+    """Return the explicit longer-preview profile without changing normal V2 defaults."""
+    return replace(
+        config,
+        preview_min_duration=75.0,
+        preview_max_duration=90.0,
+        v2_output_name="preview_90s_v3.mp4",
+        v2_max_shots=18,
+        v2_music_window_policy="representative",
+    )
 
 
 def run_pipeline(command: str, config_path: Path, dry_run: bool = False) -> int:
@@ -990,17 +1019,19 @@ def run_pipeline(command: str, config_path: Path, dry_run: bool = False) -> int:
         print("Full Fast Montage and Full Highlights rendering is intentionally blocked until the human approves preview_60s.mp4.", file=sys.stderr)
         return 2
     config = load_config(Path(config_path))
+    if command in {"all-v2-long", "render-preview-v2-long", "verify-preview-v2-long"}:
+        config = _long_v2_config(config)
     if command == "verify-preview":
         return _verify_preview(config)
-    if command == "verify-preview-v2":
+    if command in {"verify-preview-v2", "verify-preview-v2-long"}:
         return verify_preview_v2(config)
     if command == "render-preview":
         render_preview_stage(config)
         return 0
-    if command == "render-preview-v2":
+    if command in {"render-preview-v2", "render-preview-v2-long"}:
         render_preview_v2_stage(config)
         return 0
-    if command == "all-v2":
+    if command in {"all-v2", "all-v2-long"}:
         v2_state = run_v2_analysis_pipeline(config)
         if dry_run:
             return 0

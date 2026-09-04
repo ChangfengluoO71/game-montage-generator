@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,27 @@ def _pair(value: Any, default: tuple[int, int]) -> tuple[int, int]:
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         return default
     return int(value[0]), int(value[1])
+
+
+def _excluded_ranges(value: Any) -> tuple[tuple[str, float, float, str], ...]:
+    """Parse explicit filename/time editorial exclusions without touching sources."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    parsed: list[tuple[str, float, float, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        source_name = str(item.get("source_name", "")).strip()
+        try:
+            start = float(item.get("start"))
+            end = float(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not source_name or not math.isfinite(start) or not math.isfinite(end) or start < 0.0 or end <= start:
+            continue
+        reason = str(item.get("reason", "editorial_exclusion")).strip() or "editorial_exclusion"
+        parsed.append((source_name, start, end, reason))
+    return tuple(parsed)
 
 
 @dataclass(frozen=True)
@@ -81,6 +103,9 @@ class PipelineConfig:
     audio_mix: dict[str, Any]
     boundary_window_ms: int = 500
     anchor_sync_tolerance: float = 0.75
+    v2_excluded_ranges: tuple[tuple[str, float, float, str], ...] = ()
+    v2_max_shots: int = 14
+    v2_music_window_policy: str = "baseline"
 
     @property
     def analysis_dir(self) -> Path:
@@ -281,6 +306,9 @@ def load_config(path: Path) -> PipelineConfig:
         audio_mix=audio_mix,
         boundary_window_ms=int(raw.get("boundary_window_ms", 500)),
         anchor_sync_tolerance=float(raw.get("anchor_sync_tolerance", 0.75)),
+        v2_excluded_ranges=_excluded_ranges(raw.get("v2_excluded_ranges", [])),
+        v2_max_shots=max(1, int(raw.get("v2_max_shots", 14))),
+        v2_music_window_policy=str(raw.get("v2_music_window_policy", "baseline")).strip().lower() or "baseline",
     )
 
 

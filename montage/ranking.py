@@ -9,7 +9,7 @@ from .config import PipelineConfig
 from .models import Candidate, CandidateVariant, PayoffEvent
 
 
-RAPID_MULTIKILL_MAX_BONUS = 0.12
+RAPID_MULTIKILL_MAX_BONUS = 0.18
 
 
 def _clamp(value: float) -> float:

@@ -84,6 +84,28 @@ def _section(elapsed: float, total: float, is_final: bool = False) -> str:
     return "escalation"
 
 
+def _preview_music_interval(
+    music: MusicAnalysis, baseline_edit: EditDecisionList, config: PipelineConfig
+) -> tuple[float, float, str]:
+    """Return the interval that must cover the complete selected edit."""
+    if (
+        config.v2_music_window_policy == "representative"
+        and music.preview_music_in is not None
+        and music.preview_music_out is not None
+        and float(music.preview_music_out) > float(music.preview_music_in)
+    ):
+        return (
+            float(music.preview_music_in),
+            float(music.preview_music_out),
+            music.preview_reason or "representative music structure window",
+        )
+    return (
+        float(baseline_edit.music_in),
+        float(baseline_edit.music_out),
+        "retained locked V1 baseline interval",
+    )
+
+
 def _anchor_timeline_time(variant: CandidateVariant, timeline_in: float) -> float | None:
     anchor = variant.primary_anchor
     if anchor is None:
@@ -282,20 +304,21 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
     """Build the best bounded preview state and write its EDL before rendering."""
     if not variants:
         raise ValueError("V2 preview requires candidate variants")
-    music_duration = max(0.0, baseline_edit.music_out - baseline_edit.music_in)
+    selected_music_in, selected_music_out, music_reason = _preview_music_interval(music, baseline_edit, config)
+    music_duration = max(0.0, selected_music_out - selected_music_in)
     target_max = min(config.preview_max_duration, music_duration) if music_duration else config.preview_max_duration
     states = [BeamState(target_duration=target_max)]
     completed: list[BeamState] = []
     ordinary_quality = max((variant.final_score for variant in variants if variant.anchor_event_type not in {"hero_play", "hero", "finale"}), default=0.0)
     hero_quality_floor = ordinary_quality - config.hero_quality_margin
     expansion_counter = [0]
-    for _ in range(14):
+    for _ in range(max(1, config.v2_max_shots)):
         next_states: list[BeamState] = []
         for state in states:
             if len(state.shots) >= 8 and config.preview_min_duration <= state.elapsed <= target_max:
                 completed.append(state)
-            if len(state.shots) < 14 and state.elapsed < target_max - 1e-6:
-                next_states.extend(expand_beam(state, variants, music, config, baseline_music_in=baseline_edit.music_in,
+            if len(state.shots) < config.v2_max_shots and state.elapsed < target_max - 1e-6:
+                next_states.extend(expand_beam(state, variants, music, config, baseline_music_in=selected_music_in,
                                                hero_quality_floor=hero_quality_floor,
                                                expansion_budget=config.beam_max_expansions,
                                                expansion_counter=expansion_counter))
@@ -306,7 +329,10 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
         states = sorted(next_states, key=lambda item: item.score, reverse=True)[:max(1, config.beam_width)]
     completed.extend(state for state in states if len(state.shots) >= 8 and config.preview_min_duration <= state.elapsed <= target_max)
     if not completed:
-        raise ValueError("unable to build an 8-14 shot V2 preview within 45-60 seconds")
+        raise ValueError(
+            f"unable to build an 8-{config.v2_max_shots} shot V2 preview within "
+            f"{config.preview_min_duration:g}-{config.preview_max_duration:g} seconds"
+        )
     best = max(completed, key=lambda state: (state.score, sum(shot.context_integrity_score for shot in state.shots),
                                              -abs(state.elapsed - target_max)))
     non_hero = [state for state in completed if not _is_hero(state.shots[-1])]
@@ -320,8 +346,8 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
     edit = V2EditDecisionList(
         kind="preview_v2", music_source=baseline_edit.music_source,
         baseline_music_in=baseline_edit.music_in, baseline_music_out=baseline_edit.music_out,
-        music_in=baseline_edit.music_in, music_out=baseline_edit.music_out,
-        duration=best.elapsed, music_reason="retained locked V1 baseline interval",
+        music_in=selected_music_in, music_out=selected_music_out,
+        duration=best.elapsed, music_reason=music_reason,
         shots=shots,
     )
     validate_v2_edit(edit, config)
@@ -365,10 +391,13 @@ def _duration_allowed(duration: float, anchor_type: str | None, condense_reason:
 
 def validate_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
     """Raise ValueError for edits that cannot safely proceed to a future renderer."""
-    if not 8 <= len(edit.shots) <= 14:
-        raise ValueError("V2 edit must contain 8-14 macro shots")
+    if not 8 <= len(edit.shots) <= config.v2_max_shots:
+        raise ValueError(f"V2 edit must contain 8-{config.v2_max_shots} macro shots")
     if not config.preview_min_duration <= edit.duration <= config.preview_max_duration:
-        raise ValueError("V2 edit duration must be in the 45-60 second range")
+        raise ValueError(
+            f"V2 edit duration must be in the {config.preview_min_duration:g}-"
+            f"{config.preview_max_duration:g} second range"
+        )
     if edit.music_out <= edit.music_in or edit.music_out - edit.music_in + 0.01 < edit.duration:
         raise ValueError("V2 music range is invalid")
     groups: set[str] = set()

@@ -126,6 +126,29 @@ def test_condensed_variant_preserves_saved_short_clip_prior_and_anchor_context()
     assert context_integrity_score(candidate, variant.primary_anchor, variant.source_segments) >= test_config().minimum_context_integrity
 
 
+def test_rapid_kill_condense_keeps_the_complete_short_sequence():
+    candidate = make_long_candidate()
+    events = [
+        make_event("kill-1", 10.0, 0.86, 0.86, "kill"),
+        make_event("kill-2", 11.2, 0.88, 0.88, "kill"),
+        make_event("multi", 13.9, 0.94, 0.96, "multikill"),
+    ]
+
+    variant = build_condensed_variants(candidate, events, make_music(), test_config())[0]
+    segment = variant.source_segments[0]
+
+    assert len(variant.source_segments) == 1
+    assert segment.source_in <= events[0].source_time
+    assert segment.source_out >= events[-1].source_time
+    assert variant.duration <= 6.5
+    assert "rapid-kill" in variant.rationale.lower()
+    assert {event.event_id for event in variant.payoff_events} == {"kill-1", "kill-2", "multi"}
+
+
+def test_rapid_multikill_bonus_cap_matches_editorial_priority():
+    assert test_config().rapid_multikill_bonus_weight == pytest.approx(0.18)
+
+
 def test_boundary_anchor_falls_back_to_original_continuous_range():
     candidate = make_long_candidate()
     anchor = make_event("boundary", 0.2, 0.9, 0.9, "kill")
