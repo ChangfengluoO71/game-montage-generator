@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce a longer, approximately 75–90 second V3 preview that excludes the identified training-range intervals, favors compact rapid-kill sequences, and keeps continuous music underneath audible gameplay audio.
+**Goal:** Produce a longer, approximately 60–90 second V3 preview that excludes the identified training-range intervals, favors compact rapid-kill sequences, and keeps continuous music underneath audible gameplay audio.
 
 **Architecture:** Preserve the existing V1 baseline and V2 preview. Add transparent, filename-and-time based editorial exclusions to the V2 aggregation path, make rapid-kill condensation a single continuous window, and expose a separate long-preview profile that selects a representative 75–90 second music structure. Fix the V2 audio filter graph by explicitly splitting the game bus before sidechain ducking and final mixing.
 
@@ -89,9 +89,9 @@ Expected: failures identify missing curation/config/profile behavior and the cur
 - Modify: `tests/test_v2_timeline.py`
 - Modify: `tests/test_v2_cli_report.py`
 
-**Interfaces:** Normal `all-v2` remains baseline-locked at its existing 45–60 second policy. The new long commands use a copied config with `preview_min_duration=75.0`, `preview_max_duration=90.0`, `v2_max_shots=18`, `v2_music_window_policy=representative`, and `v2_output_name=preview_90s_v3.mp4`.
+**Interfaces:** Normal `all-v2` remains baseline-locked at its existing 45–60 second policy. The new long commands use a copied config with `preview_min_duration=60.0`, `preview_max_duration=90.0`, `v2_max_shots=18`, `v2_music_window_policy=representative`, and `v2_output_name=preview_90s_v3.mp4`.
 
-- [ ] **Step 1: Add representative policy branching to `analyze_music_v2`.** For the long profile, call the existing representative structure chooser with the configured 75–90 second bounds; retain baseline/±0.5 behavior for default V2. Add policy and duration bounds to the music cache key.
+- [ ] **Step 1: Add representative policy branching to `analyze_music_v2`.** For the long profile, call the existing representative structure chooser with the configured 60–90 second bounds; retain baseline/±0.5 behavior for default V2. Add policy and duration bounds to the music cache key.
 - [ ] **Step 2: Make beam expansion, target duration, and validation use `config.v2_max_shots` and the selected music interval.** Use the representative `preview_music_in/out` when policy is `representative`; reject intervals shorter than the requested rendered duration.
 - [ ] **Step 3: Add explicit long CLI commands and profile mapping.** Keep dry-run before render, and keep full-output guards unchanged.
 - [ ] **Step 4: Run the long-profile timeline/CLI tests, then run all V2 timeline/music/CLI tests.**
@@ -115,7 +115,7 @@ Expected: failures identify missing curation/config/profile behavior and the cur
 
 - [ ] **Step 1: Run the complete test suite, compileall, and diff check.**
 - [ ] **Step 2: Record RAW manifest and V1 baseline manifest before the real run.**
-- [ ] **Step 3: Run `D:/miniconda/python.exe main.py all-v2-long --dry-run`; inspect `work/analysis/preview/preview_v2_edit.json` before rendering.** Confirm 75–90 seconds, no selected source range overlaps either training-range interval, EDL fields are complete, music interval spans the target duration, and no full montage output exists.
+- [ ] **Step 3: Run `D:/miniconda/python.exe main.py all-v2-long --dry-run`; inspect `work/analysis/preview/preview_v2_edit.json` before rendering.** Confirm 60–90 seconds, no selected source range overlaps either training-range interval, EDL fields are complete, music interval spans the target duration, and no full montage output exists.
 - [ ] **Step 4: Run `D:/miniconda/python.exe main.py all-v2-long` to render only `preview_90s_v3.mp4`.**
 - [ ] **Step 5: Run `D:/miniconda/python.exe main.py verify-preview-v2-long` plus explicit FFmpeg 8 full decode, ffprobe duration/geometry/fps/codec checks, packet/frame monotonicity checks, and full-range audio loudness/silence checks. Music must cover the entire output; game transients must remain measurable.
 - [ ] **Step 6: Re-check RAW manifest, V1 baseline SHA/size/mtime, V2 full-output absence, and FFmpeg/ffprobe paths in `environment_v2.json` and `pipeline.log`.

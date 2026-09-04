@@ -97,6 +97,16 @@ def test_v2_commands_are_exposed():
     assert {"all-v2-long", "render-preview-v2-long", "verify-preview-v2-long"} <= set(choices)
 
 
+def test_long_profile_raises_only_its_bounded_search_budget():
+    base = main.load_config(main.PROJECT_ROOT / "config.yaml")
+    long_config = main._long_v2_config(base)
+
+    assert long_config.preview_min_duration == 60.0
+    assert long_config.preview_max_duration == 90.0
+    assert long_config.beam_max_expansions >= 32768
+    assert base.beam_max_expansions == 8192
+
+
 def test_report_contains_baseline_and_event_metrics(tmp_path):
     report = build_v2_sync_report(_v2_edit(tmp_path), _baseline(), [], {"stationary_ads": 2})
     assert report["baseline_music_range"] == [19.0, 74.252]
@@ -136,6 +146,21 @@ def test_report_distinguishes_unavailable_v1_penalties_from_zero(tmp_path):
     assert pair["v1_reason"] == "V1 penalty artifacts are unavailable"
     assert pair["v2"] == 0.0
     assert pair["delta"] is None
+
+
+def test_report_records_editorial_exclusions_and_rejections(tmp_path):
+    exclusions = (("training.mp4", 49.0, 55.0, "training_range"),)
+    report = build_v2_sync_report(
+        _v2_edit(tmp_path), _baseline(), [], {"editorial_exclusion": 2},
+        editorial_exclusions=exclusions,
+    )
+
+    assert report["rejected_by_editorial_exclusion"] == 2
+    assert report["editorial_exclusions"] == [{
+        "source_name": "training.mp4", "start": 49.0, "end": 55.0,
+        "reason": "training_range",
+    }]
+    assert report["comparisons"]["rejected_by_editorial_exclusion"]["v2"] == 2
 
 
 def test_stale_event_artifact_is_not_a_valid_variant_cache_hit(tmp_path):

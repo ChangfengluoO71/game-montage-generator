@@ -162,11 +162,13 @@ def _best_rapid_window(
     end = min(candidate.source_end, cluster[-1].source_time + 1.0)
     if end <= start:
         return None
+    rounded_start = round(start, 3)
+    rounded_end = round(end, 3)
     segment = SourceSegment(
         candidate.source_file,
-        round(start, 3),
-        round(end, 3),
-        round(end - start, 3),
+        rounded_start,
+        rounded_end,
+        round(rounded_end - rounded_start, 3),
     )
     return segment, cluster
 

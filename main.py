@@ -398,7 +398,7 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
         {"inputs": _v2_cache_inputs(config)},
         "v2_variants_and_events",
         {
-            "stage_version": "v2-aggregate-artifacts-4",
+            "stage_version": "v2-aggregate-artifacts-5",
             "ffmpeg_version": toolchain.ffmpeg_version,
             "detector_version": config.payoff_detector_version,
             "payoff_analysis_fps": config.payoff_analysis_fps,
@@ -586,6 +586,11 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
                 write_v2_dedupe_summary(dedupe, config.dedupe_summary_v2_path)
                 candidate_payload = json.loads(config.highlight_candidates_v2_path.read_text(encoding="utf-8"))
                 candidate_payload["cache_key"] = aggregate_key
+                candidate_payload["editorial_exclusion_count"] = rejected.get("editorial_exclusion", 0)
+                candidate_payload["editorial_exclusions"] = [
+                    {"source_name": source_name, "start": start, "end": end, "reason": reason}
+                    for source_name, start, end, reason in config.v2_excluded_ranges
+                ]
                 atomic_write_json(config.highlight_candidates_v2_path, candidate_payload)
             else:
                 dedupe = None
@@ -594,6 +599,13 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     else:
         events = _load_cached_payoff_events(config)
         dedupe = None
+        try:
+            cached_candidates = json.loads(config.highlight_candidates_v2_path.read_text(encoding="utf-8"))
+            cached_exclusions = int(cached_candidates.get("editorial_exclusion_count", 0))
+            if cached_exclusions >= 0:
+                rejected["editorial_exclusion"] = cached_exclusions
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
         if config.dedupe_summary_v2_path.exists():
             cached_dedupe = json.loads(config.dedupe_summary_v2_path.read_text(encoding="utf-8"))
             if not isinstance(cached_dedupe, dict):
@@ -608,8 +620,11 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     edit = build_v2_preview_edit(variants, music, baseline, config)
     validate_v2_edit(edit, config)
     _write_v2_edit(edit, config)
-    report = build_v2_sync_report(edit, baseline, variants, rejected,
-                                  lookback_window=config.recent_source_window)
+    report = build_v2_sync_report(
+        edit, baseline, variants, rejected,
+        lookback_window=config.recent_source_window,
+        editorial_exclusions=config.v2_excluded_ranges,
+    )
     write_v2_report(report, config.preview_v2_sync_report_path)
     render_v2_timeline_plot(edit, music, config.preview_v2_timeline_image_path)
     raw_after = _raw_manifest(config)
@@ -1006,10 +1021,11 @@ def _long_v2_config(config: PipelineConfig) -> PipelineConfig:
     """Return the explicit longer-preview profile without changing normal V2 defaults."""
     return replace(
         config,
-        preview_min_duration=75.0,
+        preview_min_duration=60.0,
         preview_max_duration=90.0,
         v2_output_name="preview_90s_v3.mp4",
         v2_max_shots=18,
+        beam_max_expansions=max(config.beam_max_expansions, 32768),
         v2_music_window_policy="representative",
     )
 

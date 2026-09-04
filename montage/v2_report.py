@@ -99,7 +99,8 @@ def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookb
 
 def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
                          variants: Sequence[CandidateVariant], rejected: dict[str, int],
-                         *, lookback_window: int = 2) -> dict[str, object]:
+                         *, lookback_window: int = 2,
+                         editorial_exclusions: Sequence[tuple[str, float, float, str]] = ()) -> dict[str, object]:
     rapid_scores = [float(getattr(variant, "rapid_multikill_score", 0.0)) for variant in variants]
     v2 = _edit_metrics(edit, variants=variants, lookback_window=lookback_window)
     v1 = _edit_metrics(baseline, lookback_window=lookback_window, penalty_metrics_unavailable=True)
@@ -114,6 +115,9 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
         "rejected_by_stationary_ads": int(rejected.get("stationary_ads", rejected.get("rejected_by_stationary_ads", 0))),
         "rejected_by_downtime": int(rejected.get("downtime", rejected.get("rejected_by_downtime", 0))),
         "rejected_by_no_payoff": int(rejected.get("no_payoff", rejected.get("rejected_by_no_payoff", 0))),
+        "rejected_by_editorial_exclusion": int(
+            rejected.get("editorial_exclusion", rejected.get("rejected_by_editorial_exclusion", 0))
+        ),
     }
     comparisons.update({key: _metric_pair(None, value) for key, value in rejected_metrics.items()})
     for key, value in rejected.items():
@@ -132,6 +136,10 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
         **rejected_metrics,
         "comparisons": comparisons,
         "rejections": {str(key): int(value) for key, value in rejected.items()},
+        "editorial_exclusions": [
+            {"source_name": str(source_name), "start": float(start), "end": float(end), "reason": str(reason)}
+            for source_name, start, end, reason in editorial_exclusions
+        ],
         "dedupe": {"unique_duplicate_groups": len({shot.duplicate_group for shot in edit.shots if shot.duplicate_group}),
                     "selected_shots": len(edit.shots)},
         "rapid_multikill": {"candidate_count": sum(1 for value in rapid_scores if value > 0),

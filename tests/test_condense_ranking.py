@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from montage.condense import (
+    _best_rapid_window,
     build_condensed_variants,
     context_integrity_score,
     select_anchors,
@@ -147,6 +148,20 @@ def test_rapid_kill_condense_keeps_the_complete_short_sequence():
 
 def test_rapid_multikill_bonus_cap_matches_editorial_priority():
     assert test_config().rapid_multikill_bonus_weight == pytest.approx(0.18)
+
+
+def test_rapid_window_rounding_keeps_segment_duration_consistent():
+    candidate = make_long_candidate()
+    events = [
+        make_event("round-1", 10.0001, 0.9, 0.9, "kill"),
+        make_event("round-2", 11.0026, 0.9, 0.9, "kill"),
+    ]
+
+    result = _best_rapid_window(candidate, events, test_config())
+
+    assert result is not None
+    segment, _ = result
+    assert segment.duration == pytest.approx(segment.source_out - segment.source_in, abs=0.000001)
 
 
 def test_boundary_anchor_falls_back_to_original_continuous_range():
