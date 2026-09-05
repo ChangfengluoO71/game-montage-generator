@@ -205,7 +205,7 @@ class MontageLab(QMainWindow):
         self.settings = QSettings(APP_ORGANIZATION, APP_NAME)
         self.data_dir = Path(self.settings.fileName()).parent
         self.profiles_dir = self.data_dir / "profiles"
-        self._build_ui(); self._restore_preferences()
+        self._build_ui(); self._restore_preferences(); self.refresh_profiles()
 
     def _build_ui(self) -> None:
         root = QWidget(); self.setCentralWidget(root); layout = QVBoxLayout(root)
@@ -218,9 +218,9 @@ class MontageLab(QMainWindow):
     def _build_game_page(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("步骤 1：选择游戏配置", objectName="heading")); layout.addWidget(QLabel("选择已有配置，或为一个游戏创建多条高光规则。"))
         self.game_buttons = QButtonGroup(self); self.game_buttons.setExclusive(True)
-        built_in = QPushButton("Battlefield 6 · Skull Row（内置）"); built_in.setCheckable(True); built_in.setChecked(True); self.game_buttons.addButton(built_in); layout.addWidget(built_in)
+        self.profile_list = QVBoxLayout(); layout.addLayout(self.profile_list)
         custom = QPushButton("＋ 添加自定义游戏 / 新规则"); custom.clicked.connect(self.open_custom_profile); layout.addWidget(custom)
-        layout.addWidget(QLabel("示例：先创建 Apex Legends / 击杀；再次选择“添加自定义游戏 / 新规则”，填 Apex Legends / 击倒，即会追加到同一个 Apex 配置。"))
+        layout.addWidget(QLabel("同一个游戏可添加多条规则，例如 Apex Legends / 击杀、击倒。"))
         imported = QPushButton("↥ 导入外部配置 JSON"); imported.clicked.connect(self.import_profile); layout.addWidget(imported); layout.addStretch(); self.steps.addWidget(page)
 
     def _build_media_page(self) -> None:
@@ -237,10 +237,24 @@ class MontageLab(QMainWindow):
     def _build_ready_page(self) -> None:
         page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("步骤 4：准备生成", objectName="heading")); self.summary = QLabel(); self.summary.setWordWrap(True); layout.addWidget(self.summary); generate = QPushButton("开始生成 AI 初剪"); generate.clicked.connect(lambda: QMessageBox.information(self, "本地 Worker", "Worker 接口将在下一实现切片接入；当前项目配置已完成。")); layout.addWidget(generate); layout.addStretch(); self.steps.addWidget(page)
 
+    def refresh_profiles(self) -> None:
+        while self.profile_list.count():
+            item = self.profile_list.takeAt(0); widget = item.widget()
+            if widget: widget.deleteLater()
+        builtin = QPushButton("Battlefield 6 · Skull Row（内置）"); builtin.setCheckable(True); builtin.setChecked(True); self.game_buttons.addButton(builtin); self.profile_list.addWidget(builtin)
+        for path in sorted(self.profiles_dir.glob("*-workflow.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")); game = data.get("game", {}).get("display_name", path.stem); rules = data.get("detectors", {}).get("rules", [])
+                labels = ", ".join(r.get("label", "Unnamed") for r in rules)
+                button = QPushButton(f"{game} | {len(rules)} rules | {labels}")
+                button.setCheckable(True); self.game_buttons.addButton(button); self.profile_list.addWidget(button)
+            except (OSError, json.JSONDecodeError):
+                continue
+
     def open_custom_profile(self) -> None:
         wizard = ProfileWizard(self.profiles_dir, self)
         if wizard.exec():
-            self.settings.setValue("last_custom_profile", wizard.name.text().strip())
+            self.settings.setValue("last_custom_profile", wizard.name.text().strip()); self.refresh_profiles()
 
     def import_profile(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "导入工作流配置", "", "Workflow JSON (*.json)")
