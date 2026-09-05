@@ -6,4 +6,16 @@ document.getElementById('generate').addEventListener('click', () => { const valu
 document.getElementById('exportProject').addEventListener('click', () => showToast('项目已导出为 editable project.json'));
 document.getElementById('importProject').addEventListener('click', () => showToast('请选择 workflow 或 project JSON 文件'));
 document.getElementById('newProfile').addEventListener('click', () => showToast('配置向导即将打开：上传标志、全屏正例和负例'));
-document.getElementById('dropzone').addEventListener('click', () => showToast('素材导入接口已预留，本地 worker 接入后可直接扫描文件夹')));
+const videoFolder = document.getElementById('videoFolder');
+const musicFile = document.getElementById('musicFile');
+document.getElementById('chooseVideo').addEventListener('click', () => videoFolder.click());
+document.getElementById('chooseMusic').addEventListener('click', () => musicFile.click());
+videoFolder.addEventListener('change', () => { const files = [...videoFolder.files]; const videos = files.filter((file) => /\.(mp4|mkv|mov|webm)$/i.test(file.name)); if (!videos.length) { showToast('该文件夹中没有可扫描的视频文件'); return; } document.getElementById('videoPath').textContent = `${files[0].webkitRelativePath.split('/')[0]} · ${videos.length} 个视频待扫描`; document.getElementById('videoSummary').textContent = `${videos.length} 个视频文件已选择`; document.getElementById('videoCheck').textContent = '✓'; showToast('素材文件夹已选择，等待本地 worker 扫描'); });
+musicFile.addEventListener('change', () => { const file = musicFile.files[0]; if (!file) return; document.getElementById('musicPath').textContent = `${file.name} · ${Math.round(file.size / 1024 / 1024)} MB`; document.getElementById('musicSummary').textContent = file.name; document.getElementById('musicCheck').textContent = '✓'; showToast(/\.mp4$/i.test(file.name) ? '音乐视频已选择，将提取第一条音频轨' : '音乐文件已选择'); });
+document.querySelectorAll('.tool').forEach((button) => button.addEventListener('click', () => { document.querySelectorAll('.tool').forEach((item) => item.classList.remove('active')); button.classList.add('active'); showToast(`筛选：${button.textContent}`); }));
+document.querySelectorAll('.keep').forEach((button) => button.addEventListener('click', () => { const pending = button.classList.contains('muted'); button.classList.toggle('muted', !pending); button.textContent = pending ? '✓ 保留' : '○ 待审核'; showToast(pending ? '片段已加入保留列表' : '片段已退回待审核'); }));
+document.getElementById('generate').addEventListener('click', () => { const values = ['pre', 'post', 'merge', 'bridge'].map((id) => Number(document.getElementById(id).value)); if (values.some((value) => value < 0) || values[3] > values[2]) { showToast('请检查规则：桥接时长不能超过合并阈值'); return; } showToast('AI 初剪任务已排队 · 本地 worker 即将开始'); });
+document.getElementById('exportProject').addEventListener('click', () => showToast('项目已导出为 editable project.json'));
+document.getElementById('importProject').addEventListener('click', () => showToast('请选择 workflow 或 project JSON 文件'));
+document.getElementById('newProfile').addEventListener('click', () => showToast('配置向导即将打开：上传标志、全屏正例和负例'));
+document.getElementById('gameSelect').addEventListener('change', (event) => showToast(`已切换游戏配置：${event.target.value}`));
