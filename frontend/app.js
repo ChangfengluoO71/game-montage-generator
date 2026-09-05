@@ -30,4 +30,14 @@ const setProfilePage = (n) => { document.querySelectorAll('.profile-page').forEa
 document.querySelectorAll('[data-profile-next]').forEach((b)=>b.addEventListener('click',()=>setProfilePage(Number(b.dataset.profileNext))));
 ['markerSample','fullSample','negativeSample'].forEach((id)=>document.getElementById(id).addEventListener('change',(e)=>document.getElementById(id.replace('Sample','Name')).textContent=e.target.files[0]?.name||'未选择'));
 const threshold=document.getElementById('threshold'); threshold.addEventListener('input',()=>document.getElementById('thresholdValue').textContent=threshold.value);
-document.getElementById('saveProfile').addEventListener('click',()=>{showToast('自定义游戏配置已保存，可在全局设置中绑定素材目录');closeProfileWizard();});
+document.getElementById('saveProfile').addEventListener('click', () => {
+  const name = document.getElementById('customGameName').value.trim();
+  const marker = document.getElementById('markerSample').files[0];
+  const full = document.getElementById('fullSample').files[0];
+  const x1 = Number(document.getElementById('roiX1').value); const y1 = Number(document.getElementById('roiY1').value); const x2 = Number(document.getElementById('roiX2').value); const y2 = Number(document.getElementById('roiY2').value);
+  if (!name) return showToast('请填写游戏名称');
+  if (!marker || !full) return showToast('请至少上传击杀标志区域图和完整分辨率正例');
+  if (!(0 <= x1 && x1 < x2 && x2 <= 1 && 0 <= y1 && y1 < y2 && y2 <= 1)) return showToast('ROI 坐标必须是 0~1 且左上角小于右下角');
+  const config = { schema: 'game-montage-workflow-v1', game: { id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), display_name: name }, detector: { type: document.getElementById('detectorType').value, event_label: document.getElementById('customEventLabel').value || 'OWN_KILL', search_roi: [x1, y1, x2, y2], threshold: Number(document.getElementById('threshold').value), marker_sample: marker.name, positive_sample: full.name, negative_sample: document.getElementById('negativeSample').files[0]?.name || null }, metadata: { created_from: 'Montage Lab custom profile wizard', editable: true } };
+  const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${config.game.id || 'custom-game'}-workflow.json`; link.click(); URL.revokeObjectURL(link.href); showToast('配置已保存并下载 JSON，可在首页导入'); closeProfileWizard();
+});
