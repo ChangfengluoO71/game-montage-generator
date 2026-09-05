@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .workflow import DEFAULT_AUDIO_OUTPUT, MontageWorkflow
+from .workflow import DEFAULT_AUDIO_OUTPUT, MontageWorkflow, WorkflowRule
 
 APP_ORGANIZATION = "MontageLab"
 APP_NAME = "GameMontageGenerator"
@@ -260,9 +260,30 @@ class ProfileWizard(QDialog):
         output = self.profiles_dir / f"{profile.game_id}-workflow.json"
         if output.exists():
             existing = MontageWorkflow.import_json(output)
-            previous = CustomProfile.from_workflow_dict(existing.to_desktop_dict())
-            profile = CustomProfile(profile.name, previous.rules + profile.rules, previous.edit_rules, previous.audio_output, previous.metadata)
-        output.write_text(json.dumps(profile.workflow(), ensure_ascii=False, indent=2), encoding="utf-8")
+            incoming = MontageWorkflow.from_dict(profile.workflow())
+            existing_rules = list(existing.rules)
+            if not existing_rules:
+                existing_rules = [WorkflowRule("legacy-detector", existing.detector.event_label, existing.detector)]
+            used_ids = {rule.id for rule in existing_rules}
+            new_rule = incoming.rules[0]
+            base_id = new_rule.id
+            suffix = 2
+            while new_rule.id in used_ids:
+                new_rule.id = f"{base_id}-{suffix}"
+                suffix += 1
+            merged = MontageWorkflow(
+                existing.game_id,
+                existing.display_name,
+                existing_rules[0].detector,
+                existing.edit_rules,
+                existing.audio_output,
+                existing.profiles,
+                existing.metadata,
+                existing_rules + [new_rule],
+            )
+            merged.export_desktop_json(output)
+        else:
+            output.write_text(json.dumps(profile.workflow(), ensure_ascii=False, indent=2), encoding="utf-8")
         QMessageBox.information(self, "已保存", f"配置已保存到：\n{output}")
         self.accept()
 

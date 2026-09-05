@@ -72,6 +72,9 @@ class DetectorConfig:
             raise ValueError("ROI coordinate_space must be normalized")
         if not isinstance(self.thresholds, dict):
             raise ValueError("detector thresholds must be an object")
+        for name, values in (("templates", self.templates), ("positive_samples", self.positive_samples), ("negative_samples", self.negative_samples)):
+            if not isinstance(values, list):
+                raise ValueError(f"{name} must be an array")
         coords = [_finite_number(self.roi.get(key), f"ROI {key}") for key in ("x1", "y1", "x2", "y2")]
         if not (0 <= coords[0] < coords[2] <= 1 and 0 <= coords[1] < coords[3] <= 1):
             raise ValueError("ROI must be a normalized rectangle")
@@ -164,6 +167,8 @@ class MontageWorkflow:
             if rule.id in seen:
                 raise ValueError(f"duplicate workflow rule id: {rule.id}")
             seen.add(rule.id)
+        if self.rules and self.rules[0].detector.to_dict() != self.detector.to_dict():
+            raise ValueError("legacy detector must match the first workflow rule")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -188,13 +193,14 @@ class MontageWorkflow:
                 "type": detector.detector_type,
                 **({"event_label": detector.event_label} if detector.event_label != rule.label else {}),
                 "search_roi": [roi["x1"], roi["y1"], roi["x2"], roi["y2"]],
-                "threshold": detector.thresholds.get("template", 0.65),
                 "templates": detector.templates,
                 "positive_samples": detector.positive_samples,
                 "negative_samples": detector.negative_samples,
                 "metadata": rule.metadata,
             }
-            if set(detector.thresholds) != {"template"}:
+            if "template" in detector.thresholds:
+                desktop_rule["threshold"] = detector.thresholds["template"]
+            if detector.thresholds and set(detector.thresholds) != {"template"}:
                 desktop_rule["thresholds"] = detector.thresholds
             desktop_rules.append(desktop_rule)
         result = {"schema": SCHEMA_VERSION, "game": {"id": self.game_id, "display_name": self.display_name},
@@ -265,7 +271,8 @@ class MontageWorkflow:
             raw_thresholds = item.get("thresholds", {})
             if not isinstance(raw_thresholds, Mapping):
                 raise ValueError("desktop rule thresholds must be an object")
-            threshold = _finite_number(item.get("threshold", raw_thresholds.get("template", 0.65)), "rule threshold")
+            threshold_value = item.get("threshold", raw_thresholds.get("template", 0.65))
+            threshold = _finite_number(threshold_value, "rule threshold")
             if not 0 <= threshold <= 1:
                 raise ValueError("rule threshold must be between 0 and 1")
             raw_metadata = item.get("metadata", {})
@@ -282,7 +289,7 @@ class MontageWorkflow:
                 templates=list(item.get("templates", [])),
                 positive_samples=list(item.get("positive_samples", [])),
                 negative_samples=list(item.get("negative_samples", [])),
-                thresholds={str(key): value for key, value in raw_thresholds.items()} | {"template": threshold},
+                thresholds=({str(key): value for key, value in raw_thresholds.items()} | {"template": threshold}) if ("threshold" in item or "template" in raw_thresholds) else {str(key): value for key, value in raw_thresholds.items()},
             )
             base_id = str(item.get("id", "")).strip() or "rule"
             rule_id = base_id

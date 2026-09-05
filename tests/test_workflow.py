@@ -77,6 +77,24 @@ def test_desktop_duplicate_rule_ids_are_normalized() -> None:
     assert [rule.id for rule in workflow.rules] == ["rule", "rule-2"]
 
 
+@pytest.mark.parametrize("thresholds", [{}, {"geometry": 0.4}])
+def test_desktop_adapter_does_not_invent_template_threshold(thresholds) -> None:
+    detector = DetectorConfig(thresholds=thresholds)
+    source = MontageWorkflow("game", "Game", detector)
+
+    restored = MontageWorkflow.from_dict(source.to_desktop_dict())
+
+    assert restored.detector.thresholds == thresholds
+
+
+@pytest.mark.parametrize("field", ["templates", "positive_samples", "negative_samples"])
+def test_detector_sample_fields_must_be_arrays(field: str) -> None:
+    detector = DetectorConfig(**{field: "invalid"})
+
+    with pytest.raises(ValueError, match="array"):
+        detector.validate()
+
+
 def test_desktop_workflow_imports_as_multi_rule_engine_contract() -> None:
     desktop = {
         "schema": "game-montage-workflow-v1",
