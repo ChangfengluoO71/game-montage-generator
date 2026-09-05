@@ -43,6 +43,7 @@ Files: new montage/generation.py and montage/generation_worker.py, montage/kill_
 Files: montage/generation.py or focused project builder, tests/test_generation.py, tests/test_workflow_project.py.
 
 - [ ] Convert event windows to bounded TimelineClip ranges, merge source-local nearby windows, apply the documented bridge rule, and never merge across sources.
+- Bridge policy: first merge overlapping windows or windows whose uncovered gap is at most merge_gap_seconds. For a larger same-source gap, retain at most long_gap_bridge_seconds of additional context, half extending the previous tail and half extending the next head; discard the middle gap. Never bridge separate sources. End fade overlays the final available timeline duration, clamped to total length, without adding synthetic footage.
 - [ ] Export workflow snapshot, events, source ledger and EditableProject with contiguous timeline positions, music_source and actual render_settings.
 - [ ] Test event boundary clipping, merge/bridge behavior, multiple sources and rules, empty events and project import round trip.
 - [ ] Run required checks, document output and commit.

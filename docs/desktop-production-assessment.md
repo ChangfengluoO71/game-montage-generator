@@ -33,10 +33,25 @@
 
 | 阶段 | 交付 | 当前状态 |
 | --- | --- | --- |
-| M1 | 双向配置契约、实际 Apex 导入、多规则保存回归 | 执行中 |
-| M2 | 后台扫描、事件和源索引、进度日志错误 | 待实施 |
+| M1 | 双向配置契约、实际 Apex 导入、多规则保存回归 | 已完成，6ff549a + dfb52cd，独立复审通过 |
+| M2 | 后台扫描、事件和源索引、进度日志错误 | 执行中 |
 | M3 | EditableProject、时间线、音乐与渲染配置 | 待实施 |
 | M4 | 单真实视频 fresh scan → JSON → MP4 → 全片解码 | 待实施 |
 | M5 | 按钮状态、结果卡、输出目录、持久化与截图 | 待实施 |
 
 每阶段记录 py_compile、完整 pytest、offscreen 冒烟输出及提交号。最终记录输出 MP4、项目 JSON、ffprobe JSON、ffmpeg 解码输出、RAW 前后文件信息和 Qt 截图路径。截图及视频留在 work/output，不提交媒体文件。
+
+### M1 完成证据
+
+- `python -m py_compile montage/workflow.py montage/desktop_app.py`：exit 0。
+- `QT_QPA_PLATFORM=offscreen` 下 `python -m pytest -q`：240 passed, 2 warnings in 8.12s。
+- 离屏启动：MontageLab smoke: pages=4 index=0。
+- 实际旧文件直接 import_json：game_id=apex，rules=1，id=rule。
+- 保存追加回归及无 template 阈值往返回归：3 passed in 0.11s。
+- 证据文本：`D:/91/集锦/work/desktop-production-evidence/m1-checks.txt`。
+- 独立审查发现的旧规则重建数据丢失、隐式新增阈值、样本容器及首规则一致性问题已修复并复审通过。
+
+### 实施决策记录
+
+- 桥接长度解释为长间隔两端额外上下文的总预算，各分一半；若产品预期不同，只需调整项目构建策略和对应测试，不影响检测事件。
+- 在 M1 完成后并行准备扫描与独立项目渲染模块，按 M2/M3/M4 顺序验收；分离文件所有权，最终完整测试覆盖集成结果。
