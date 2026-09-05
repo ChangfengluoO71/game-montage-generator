@@ -162,7 +162,7 @@ class ProfileWizard(QDialog):
         if page == 1 and (not self.marker_path.text() or not self.positive_path.text()):
             QMessageBox.warning(self, "缺少样本", "请至少选择击杀标志区域图和完整分辨率正例。"); return False
         if page == 2:
-            try: x1, y1, x2, y2 = self._profile().roi
+            try: x1, y1, x2, y2 = self._profile().rules[0].roi
             except ValueError: QMessageBox.warning(self, "ROI 无效", "ROI 必须是数字。"); return False
             if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
                 QMessageBox.warning(self, "ROI 无效", "ROI 必须在 0~1，且左上角坐标小于右下角。"); return False
