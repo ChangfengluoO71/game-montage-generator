@@ -211,10 +211,11 @@ class MontageLab(QMainWindow):
         footer = QHBoxLayout(); self.back = QPushButton("← 返回"); self.next = QPushButton("下一步 →"); self.back.clicked.connect(self.previous); self.next.clicked.connect(self.advance); footer.addWidget(self.back); footer.addStretch(); footer.addWidget(self.next); layout.addLayout(footer); self._refresh_navigation()
 
     def _build_game_page(self) -> None:
-        page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("步骤 1：选择游戏配置", objectName="heading")); layout.addWidget(QLabel("选择已有配置，或创建一个可复用的新游戏配置。"))
+        page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("步骤 1：选择游戏配置", objectName="heading")); layout.addWidget(QLabel("选择已有配置，或为一个游戏创建多条高光规则。"))
         self.game_buttons = QButtonGroup(self); self.game_buttons.setExclusive(True)
         built_in = QPushButton("Battlefield 6 · Skull Row（内置）"); built_in.setCheckable(True); built_in.setChecked(True); self.game_buttons.addButton(built_in); layout.addWidget(built_in)
-        custom = QPushButton("＋ 自创游戏配置"); custom.clicked.connect(self.open_custom_profile); layout.addWidget(custom)
+        custom = QPushButton("＋ 添加自定义游戏 / 新规则"); custom.clicked.connect(self.open_custom_profile); layout.addWidget(custom)
+        layout.addWidget(QLabel("示例：先创建 Apex Legends / 击杀；再次选择“添加自定义游戏 / 新规则”，填 Apex Legends / 击倒，即会追加到同一个 Apex 配置。"))
         imported = QPushButton("↥ 导入外部配置 JSON"); imported.clicked.connect(self.import_profile); layout.addWidget(imported); layout.addStretch(); self.steps.addWidget(page)
 
     def _build_media_page(self) -> None:
