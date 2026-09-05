@@ -5,7 +5,7 @@ import pytest
 
 import main
 from montage.models import BoundaryDescriptor, CandidateVariant, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
-from montage.models import EditDecisionList, V2EditDecisionList
+from montage.models import EditDecisionList, V2EditDecisionList, V2EditShot
 import montage.beam_timeline as beam_timeline
 from montage.beam_timeline import BeamState, build_v2_preview_edit, expand_beam, validate_v2_edit, _expansion_score
 from montage.transitions import (
@@ -19,6 +19,13 @@ from montage.video_analysis import describe_variant_boundary
 
 def event(event_id: str, event_type: str, source_time: float, strength: float = 0.9) -> PayoffEvent:
     return PayoffEvent(event_id, event_type, source_time, 0.9, strength, 0.8, {"impact": strength})
+
+
+def verified_event(event_id: str, source_time: float, event_type: str = "kill", strength: float = 0.9) -> PayoffEvent:
+    return PayoffEvent(
+        event_id, event_type, source_time, 0.95, strength, 0.95,
+        {"killfeed_change": 0.95, "reward_roi_change": 0.95, "audio_transient": strength},
+    )
 
 
 def music() -> MusicAnalysis:
@@ -233,6 +240,77 @@ def test_v2_beam_builds_bounded_payoff_aware_edit(tmp_path, base_config):
     assert (config.preview_v2_timeline_path).exists()
 
 
+def test_quality_validation_requires_primary_anchor_to_be_verified(tmp_path, base_config):
+    config = replace(
+        base_config, raw_dir=tmp_path / "raw", v5_profile="quality",
+        v2_min_shots=1, v2_max_shots=1, preview_min_duration=1.0,
+        v5_min_verified_kills_per_shot=1,
+    )
+    verified = verified_event("verified", 5.0)
+    generic = event("generic", "combat_climax", 6.0)
+    source = tmp_path / "raw" / "clip.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.touch()
+    segment = SourceSegment(source, 0.0, 8.0, 8.0)
+    shot = V2EditShot(
+        source, 0.0, 8.0, 8.0, 0.8, "group", 0.0, 8.0, "hard_cut", 0.0,
+        "beat", 0.0, "test", source_segments=(segment,), payoff_events=(verified, generic),
+        primary_anchor=generic, anchor_event_type=generic.type,
+    )
+    edit = V2EditDecisionList("preview_v5", Path("music.wav"), 0.0, 20.0, 0.0, 20.0, 8.0, "test", (shot,))
+    with pytest.raises(ValueError, match="verified kill anchor"):
+        validate_v2_edit(edit, config)
+
+
+def test_quality_beam_rejects_high_scoring_no_kill_variant(tmp_path, base_config):
+    config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        v5_profile="quality",
+        v5_min_verified_kills_per_shot=1,
+    )
+    no_kill = timeline_variant(tmp_path, 1, quality=0.99, anchor_type="combat_climax")
+    kill = timeline_variant(tmp_path, 2, quality=0.60, anchor_type="kill")
+    payoff = verified_event("verified", 5.0, strength=0.60)
+    kill = replace(
+        kill,
+        payoff_events=(payoff,),
+        primary_anchor=payoff,
+        anchor_event_time=payoff.source_time,
+        anchor_event_type=payoff.type,
+        anchor_event_strength=payoff.strength,
+        anchor_event_confidence=payoff.confidence,
+    )
+
+    expanded = expand_beam(BeamState(target_duration=120.0), [no_kill, kill], music(), config)
+
+    assert expanded
+    assert all(item.shots[0].variant_id == "v-2" for item in expanded)
+
+
+def test_quality_validation_rejects_shot_without_verified_kill(tmp_path, base_config):
+    config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        v5_profile="quality",
+        v5_min_verified_kills_per_shot=1,
+    )
+    no_kill = [timeline_variant(tmp_path, index, anchor_type="combat_climax") for index in range(8)]
+    shots = [
+        replace(
+            _shot_for_test(replace(item, variant_id=f"no-kill-{index}", duplicate_group=f"no-kill-group-{index}")),
+            timeline_in=index * 6.0,
+            timeline_out=(index + 1) * 6.0,
+        )
+        for index, item in enumerate(no_kill)
+    ]
+    edit = _edit_for_test(shots)
+
+    with pytest.raises(ValueError, match="verified kill"):
+        validate_v2_edit(edit, config)
+
+
 def test_long_profile_uses_representative_music_window_and_configured_shot_cap(tmp_path, base_config):
     config = replace(
         base_config,
@@ -257,6 +335,36 @@ def test_long_profile_uses_representative_music_window_and_configured_shot_cap(t
     assert len(edit.shots) <= 18
     assert (edit.music_in, edit.music_out) == (5.5, 95.5)
     assert edit.music_reason == "representative build-to-chorus structure"
+
+
+def test_long_profile_allows_fewer_complete_saved_shots(tmp_path, base_config):
+    config = replace(
+        base_config,
+        raw_dir=tmp_path / "raw",
+        work_dir=tmp_path / "work",
+        preview_min_duration=45.0,
+        preview_max_duration=90.0,
+        v2_min_shots=3,
+        v2_max_shots=4,
+        v2_short_clip_max_duration=30.0,
+        v2_music_window_policy="representative",
+    )
+    representative_music = replace(
+        music(),
+        preview_music_in=5.5,
+        preview_music_out=95.5,
+        preview_reason="representative build-to-chorus structure",
+    )
+    variants = [
+        replace(timeline_variant(tmp_path, index, duration=15.0), environment_signature="short_clip")
+        for index in range(4)
+    ]
+
+    edit = build_v2_preview_edit(variants, representative_music, baseline_edit_for_timeline(), config)
+
+    assert 45.0 <= edit.duration <= 90.0
+    assert 3 <= len(edit.shots) <= 4
+    assert all(shot.duration == 15.0 for shot in edit.shots)
 
 
 def test_v2_shot_rationale_records_placement_context(tmp_path, base_config):

@@ -37,14 +37,14 @@ from montage.models import (Candidate, CandidateVariant, DedupeResult, EditDecis
                             V2EditShot, VideoAnalysis)
 from montage.music_analysis import analyze_music, analyze_music_v2
 from montage.proxy import build_proxy
-from montage.ranking import score_candidates, score_variant
+from montage.ranking import score_candidates, score_variant, verified_kill_events
 from montage.review import render_review_assets
 from montage.toolchain import Toolchain, discover_toolchain, run_command
 from montage.timeline import build_preview_edit, write_edit_list
 from montage.video_analysis import write_video_analysis, analyze_video_activity
 from montage.audio_analysis import analyze_audio_waveform, extract_analysis_audio
 from montage.condense import build_condensed_variants
-from montage.dedupe import deduplicate_variants, fingerprint_variant, write_v2_dedupe_summary
+from montage.dedupe import choose_v2_representative, deduplicate_variants, fingerprint_variant, write_v2_dedupe_summary
 from montage.beam_timeline import build_v2_preview_edit, validate_v2_edit
 from montage.payoff_detection import detect_payoff_events, ocr_available, write_payoff_events
 from montage.curation import event_is_editorially_excluded, variant_is_editorially_excluded
@@ -52,6 +52,7 @@ from montage.candidate import write_v2_candidates
 from montage.timeline_visualization import render_v2_timeline_plot
 from montage.v2_report import build_v2_sync_report, render_v2_markdown_report, write_v2_report
 from montage.v2_renderer import _preflight_v2_sources, render_v2_edit
+from montage.kill_truth.cli import run_v6_command
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -128,6 +129,9 @@ def write_environment_report(toolchain: Toolchain, config: PipelineConfig, path:
         "work_dir": str(config.work_dir),
         "output_dir": str(config.output_dir),
         "music_file": str(config.music_file),
+        "profile": config.v5_profile if config.v5_profile != "off" else "v2",
+        "selected_ffmpeg": str(toolchain.ffmpeg.resolve(strict=False)),
+        "selected_ffprobe": str(toolchain.ffprobe.resolve(strict=False)),
         "gpu": _gpu_report(),
         "toolchain": toolchain.to_dict(),
     }
@@ -323,12 +327,16 @@ def _load_music_payload(data: dict[str, Any]) -> MusicAnalysis:
         data.get("preview_music_in"), data.get("preview_music_out"), str(data.get("preview_reason", "")))
 
 
-def _variant_from_dict(data: dict[str, Any]) -> CandidateVariant:
+def _variant_from_dict(data: dict[str, Any], config: PipelineConfig | None = None) -> CandidateVariant:
     primary = _event_from_dict(data["primary_anchor"]) if data.get("primary_anchor") else None
+    environment_signature = str(data.get("environment_signature", ""))
+    human_selection_prior = float(data.get("human_selection_prior", 0.0))
+    if config is not None and config.v5_profile == "quality" and environment_signature == "short_clip":
+        human_selection_prior = max(human_selection_prior, float(config.v2_short_clip_prior))
     return CandidateVariant(
         variant_id=str(data["variant_id"]), parent_candidate_id=str(data.get("parent_candidate_id", "")),
         source_file=Path(data["source_file"]), source_segments=tuple(_segment_from_dict(item) for item in data["source_segments"]),
-        duration=float(data["duration"]), human_selection_prior=float(data.get("human_selection_prior", 0.0)),
+        duration=float(data["duration"]), human_selection_prior=human_selection_prior,
         payoff_score=float(data.get("payoff_score", 0.0)), combat_intensity=float(data.get("combat_intensity", 0.0)),
         action_density=float(data.get("action_density", 0.0)), continuity=float(data.get("continuity", 0.0)),
         visual_novelty=float(data.get("visual_novelty", 0.0)), motion=float(data.get("motion", 0.0)),
@@ -339,7 +347,7 @@ def _variant_from_dict(data: dict[str, Any]) -> CandidateVariant:
         anchor_event_time=data.get("anchor_event_time"), anchor_event_type=data.get("anchor_event_type"),
         anchor_event_strength=data.get("anchor_event_strength"), anchor_event_confidence=data.get("anchor_event_confidence"),
         context_integrity_score=float(data.get("context_integrity_score", 1.0)), penalty_values=dict(data.get("penalty_values", {})),
-        source_signature=str(data.get("source_signature", "")), environment_signature=str(data.get("environment_signature", "")),
+        source_signature=str(data.get("source_signature", "")), environment_signature=environment_signature,
         weapon_or_view_signature=str(data.get("weapon_or_view_signature", "")), condense_reason=str(data.get("condense_reason", "")),
         rationale=str(data.get("rationale", "")), score_components=dict(data.get("score_components", {})),
         rapid_multikill_score=float(data.get("rapid_multikill_score", 0.0)), rapid_multikill_bonus=float(data.get("rapid_multikill_bonus", 0.0)),
@@ -352,7 +360,15 @@ def _load_v2_variants(config: PipelineConfig) -> list[CandidateVariant]:
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("variants", payload.get("candidates", payload)) if isinstance(payload, dict) else payload
-    return [_variant_from_dict(row) for row in rows]
+    return [_variant_from_dict(row, config) for row in rows]
+
+
+def _filter_cached_variants_by_editorial_exclusions(
+    variants: Sequence[CandidateVariant], config: PipelineConfig,
+) -> tuple[list[CandidateVariant], int]:
+    """Apply current exclusions to cached variants without re-decoding media."""
+    kept = [variant for variant in variants if not variant_is_editorially_excluded(variant, config)]
+    return kept, len(variants) - len(kept)
 
 
 def _score_v2_variants(variants: list[CandidateVariant], config: PipelineConfig) -> list[CandidateVariant]:
@@ -398,7 +414,7 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
         {"inputs": _v2_cache_inputs(config)},
         "v2_variants_and_events",
         {
-            "stage_version": "v2-aggregate-artifacts-5",
+            "stage_version": "v2-aggregate-artifacts-v5-quality-5" if config.v5_profile == "quality" else "v2-aggregate-artifacts-6",
             "ffmpeg_version": toolchain.ffmpeg_version,
             "detector_version": config.payoff_detector_version,
             "payoff_analysis_fps": config.payoff_analysis_fps,
@@ -408,6 +424,20 @@ def _v2_artifact_cache_key(config: PipelineConfig, toolchain: Toolchain) -> str:
             "payoff_evidence_threshold": config.payoff_evidence_threshold,
             "long_clip_threshold": config.long_clip_threshold,
             "v2_excluded_ranges": [list(item) for item in config.v2_excluded_ranges],
+            "v2_short_clip_max_duration": config.v2_short_clip_max_duration,
+            "v2_short_clip_prior": config.v2_short_clip_prior,
+            "v5_profile": config.v5_profile,
+            "v5_min_kill_semantic_confidence": config.v5_min_kill_semantic_confidence,
+            "v5_min_killfeed_evidence": config.v5_min_killfeed_evidence,
+            "v5_min_reward_evidence": config.v5_min_reward_evidence,
+            "v5_min_verified_kills_per_shot": config.v5_min_verified_kills_per_shot,
+            "v5_kill_density_window_s": config.v5_kill_density_window_s,
+            "v5_kill_density_target": config.v5_kill_density_target,
+            "v5_kill_count_weight": config.v5_kill_count_weight,
+            "v5_kill_density_weight": config.v5_kill_density_weight,
+            "v5_max_sequences_per_candidate": config.v5_max_sequences_per_candidate,
+            "v5_sequence_context_s": config.v5_sequence_context_s,
+            "v5_min_rapid_context_tail_s": config.v5_min_rapid_context_tail_s,
             "roi_profile": {
                 str(name): [float(value) for value in bounds]
                 if isinstance(bounds, (list, tuple)) else bounds
@@ -431,6 +461,8 @@ def _v2_artifact_cache_hit(config: PipelineConfig, expected_key: str) -> bool:
         if not isinstance(rows, list) or not rows or not isinstance(event_rows, list):
             return False
         required_components = set(config.v2_weights) | {"rapid_multikill_score", "rapid_multikill_bonus"}
+        if config.v5_profile == "quality":
+            required_components |= {"verified_kill_count", "verified_kill_score", "rapid_kill_count", "kill_density"}
         for row in rows:
             if not isinstance(row, dict):
                 return False
@@ -502,6 +534,7 @@ def _write_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
             f"Source: {shot.source}",
             f"Source range: {_format_v2_time(shot.source_in)} - {_format_v2_time(shot.source_out)}",
             f"Score: {shot.candidate_score:.3f}",
+            f"Verified kills: {len(verified_kill_events(shot.payoff_events, config))}",
             f"Duplicate group: {shot.duplicate_group or 'none'}",
             f"Music: target {music_target}; event {shot.music_event_type or 'none'}",
             f"Sync: event {_format_v2_offset(shot.event_sync_offset)}; cut {_format_v2_offset(shot.cut_sync_offset)}",
@@ -517,7 +550,7 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     ensure_runtime_dirs(config)
     logger = _logger(config)
     raw_before = _raw_manifest(config)
-    atomic_write_json(config.analysis_dir / "raw_manifest_v2_before.json", raw_before)
+    atomic_write_json(config.raw_manifest_v2_before_path, raw_before)
     toolchain = discover_toolchain(config)
     write_environment_report(toolchain, config, config.environment_v2_path)
     _log_v2_toolchain(logger, toolchain)
@@ -540,6 +573,11 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     events: list[PayoffEvent] = []
     rejected: dict[str, int] = {}
     cache_hit = bool(variants) and _v2_artifact_cache_hit(config, aggregate_key)
+    cached_excluded_count = 0
+    if cache_hit:
+        variants, cached_excluded_count = _filter_cached_variants_by_editorial_exclusions(variants, config)
+        if cached_excluded_count:
+            logger.info("V2 cache filtered %d variants by current editorial exclusions", cached_excluded_count)
     if not cache_hit:
         variants = []
         candidates_path = config.analysis_dir / "highlight_candidates.json"
@@ -579,8 +617,13 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
             if variants:
                 fingerprints = {variant.variant_id: fingerprint_variant(variant, variant.source_file, toolchain, config)
                                 for variant in variants}
-                dedupe = deduplicate_variants(variants, fingerprints, config.dedupe_threshold)
-                variants = [group[0] for group in dedupe.groups]
+                dedupe = deduplicate_variants(
+                    variants,
+                    fingerprints,
+                    config.dedupe_threshold,
+                    strict_source_overlap=config.v5_profile == "quality",
+                )
+                variants = [choose_v2_representative(group, "fast") for group in dedupe.groups]
                 write_v2_candidates(variants, config.highlight_candidates_v2_path,
                                     config.highlight_candidates_v2_csv_path, config=config)
                 write_v2_dedupe_summary(dedupe, config.dedupe_summary_v2_path)
@@ -599,11 +642,13 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     else:
         events = _load_cached_payoff_events(config)
         dedupe = None
+        if cached_excluded_count:
+            rejected["editorial_exclusion"] = cached_excluded_count
         try:
             cached_candidates = json.loads(config.highlight_candidates_v2_path.read_text(encoding="utf-8"))
             cached_exclusions = int(cached_candidates.get("editorial_exclusion_count", 0))
             if cached_exclusions >= 0:
-                rejected["editorial_exclusion"] = cached_exclusions
+                rejected["editorial_exclusion"] = rejected.get("editorial_exclusion", 0) + cached_exclusions
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             pass
         if config.dedupe_summary_v2_path.exists():
@@ -624,6 +669,7 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
         edit, baseline, variants, rejected,
         lookback_window=config.recent_source_window,
         editorial_exclusions=config.v2_excluded_ranges,
+        config=config,
     )
     write_v2_report(report, config.preview_v2_sync_report_path)
     render_v2_timeline_plot(edit, music, config.preview_v2_timeline_image_path)
@@ -631,7 +677,7 @@ def run_v2_analysis_pipeline(config: PipelineConfig) -> V2PipelineState:
     if raw_before != raw_after:
         raise RuntimeError("RAW manifest changed during V2 analysis")
     assert_baseline_unchanged(manifest, config.baseline_output_path)
-    atomic_write_json(config.analysis_dir / "raw_manifest_v2_after.json", raw_after)
+    atomic_write_json(config.raw_manifest_v2_after_path, raw_after)
     logger.info("V2 analysis complete; render stop rule active; output=%s", config.v2_output_path)
     return V2PipelineState(config, toolchain, manifest, music, window, events, variants, dedupe, edit, report, rejected)
 
@@ -668,11 +714,16 @@ def verify_preview_v2(config: PipelineConfig) -> int:
                               "-map", "0", "-f", "null", "NUL"], check=False)
         baseline = json.loads(config.baseline_manifest_v2_path.read_text(encoding="utf-8"))
         assert_baseline_unchanged(baseline, config.baseline_output_path)
-        raw_before_path = config.analysis_dir / "raw_manifest_v2_before.json"
+        raw_before_path = config.raw_manifest_v2_before_path
         raw_integrity = True
         if raw_before_path.exists():
             raw_integrity = _raw_manifest(config) == json.loads(raw_before_path.read_text(encoding="utf-8"))
-        full_outputs = [config.output_dir / "fast_montage.mp4", config.output_dir / "full_highlights.mp4"]
+        full_outputs = [
+            config.output_dir / name for name in (
+                "fast_montage.mp4", "full_highlights.mp4",
+                "Battlefield_Fast_Montage.mp4", "Battlefield_Full_Highlights.mp4",
+            )
+        ]
         shot_groups = [shot.duplicate_group for shot in edit.shots if shot.duplicate_group]
         ranges_valid = all(shot.source_in >= 0 and shot.source_out > shot.source_in and shot.duration > 0 for shot in edit.shots)
         integrity_valid = all(shot.context_integrity_score >= config.minimum_context_integrity for shot in edit.shots)
@@ -1006,7 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Battlefield gameplay-aware highlight montage pipeline")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("index", "analyze-video", "analyze-music", "candidates", "review", "render-preview", "render-fast", "render-full", "verify-preview", "render-preview-v2", "verify-preview-v2", "render-preview-v2-long", "verify-preview-v2-long"):
+    for command in ("index", "analyze-video", "analyze-music", "candidates", "review", "render-preview", "render-fast", "render-full", "verify-preview", "render-preview-v2", "verify-preview-v2", "render-preview-v2-long", "verify-preview-v2-long", "render-preview-v2-quality", "verify-preview-v2-quality", "v6-calibrate", "v6-review", "v6-verify"):
         subparsers.add_parser(command)
     all_parser = subparsers.add_parser("all")
     all_parser.add_argument("--dry-run", action="store_true", help="run analysis and EDL generation without rendering video")
@@ -1014,6 +1065,10 @@ def build_parser() -> argparse.ArgumentParser:
     all_v2_parser.add_argument("--dry-run", action="store_true", help="run V2 analysis and EDL generation without rendering video")
     all_v2_long_parser = subparsers.add_parser("all-v2-long")
     all_v2_long_parser.add_argument("--dry-run", action="store_true", help="run the 75-90 second V2 analysis and EDL without rendering video")
+    all_v2_quality_parser = subparsers.add_parser("all-v2-quality")
+    all_v2_quality_parser.add_argument("--dry-run", action="store_true", help="run the 120-150 second quality analysis and EDL without rendering video")
+    v6_scan_parser = subparsers.add_parser("v6-scan")
+    v6_scan_parser.add_argument("--dry-run", action="store_true", help="emit direct-RAW crop commands without decoding")
     return parser
 
 
@@ -1021,12 +1076,43 @@ def _long_v2_config(config: PipelineConfig) -> PipelineConfig:
     """Return the explicit longer-preview profile without changing normal V2 defaults."""
     return replace(
         config,
-        preview_min_duration=60.0,
+        preview_min_duration=45.0,
         preview_max_duration=90.0,
-        v2_output_name="preview_90s_v3.mp4",
-        v2_max_shots=18,
+        v2_output_name="preview_quality_v4.mp4",
+        v2_min_shots=3,
+        v2_max_shots=8,
+        v2_short_clip_max_duration=30.0,
+        v2_short_clip_prior=0.85,
         beam_max_expansions=max(config.beam_max_expansions, 32768),
         v2_music_window_policy="representative",
+    )
+
+
+def _quality_v2_config(config: PipelineConfig) -> PipelineConfig:
+    """Return the V5 quality profile with a strict verified-kill admission gate."""
+    return replace(
+        config,
+        preview_min_duration=120.0,
+        preview_max_duration=150.0,
+        v2_output_name="preview_quality_v5.mp4",
+        v2_min_shots=10,
+        v2_max_shots=24,
+        v2_short_clip_max_duration=30.0,
+        v2_short_clip_prior=0.85,
+        beam_max_expansions=max(config.beam_max_expansions, 65536),
+        v2_music_window_policy="representative",
+        v5_profile="quality",
+        v5_min_kill_semantic_confidence=0.80,
+        v5_min_killfeed_evidence=0.25,
+        v5_min_reward_evidence=0.10,
+        v5_min_verified_kills_per_shot=1,
+        v5_kill_density_window_s=6.0,
+        v5_kill_density_target=4,
+        v5_kill_count_weight=0.20,
+        v5_kill_density_weight=0.35,
+        v5_max_sequences_per_candidate=6,
+        v5_sequence_context_s=1.25,
+        v5_min_rapid_context_tail_s=0.25,
     )
 
 
@@ -1035,19 +1121,23 @@ def run_pipeline(command: str, config_path: Path, dry_run: bool = False) -> int:
         print("Full Fast Montage and Full Highlights rendering is intentionally blocked until the human approves preview_60s.mp4.", file=sys.stderr)
         return 2
     config = load_config(Path(config_path))
+    if command in {"v6-calibrate", "v6-scan", "v6-review", "v6-verify"}:
+        return run_v6_command(command, Path(config_path), dry_run=dry_run)
     if command in {"all-v2-long", "render-preview-v2-long", "verify-preview-v2-long"}:
         config = _long_v2_config(config)
+    if command in {"all-v2-quality", "render-preview-v2-quality", "verify-preview-v2-quality"}:
+        config = _quality_v2_config(config)
     if command == "verify-preview":
         return _verify_preview(config)
-    if command in {"verify-preview-v2", "verify-preview-v2-long"}:
+    if command in {"verify-preview-v2", "verify-preview-v2-long", "verify-preview-v2-quality"}:
         return verify_preview_v2(config)
     if command == "render-preview":
         render_preview_stage(config)
         return 0
-    if command in {"render-preview-v2", "render-preview-v2-long"}:
+    if command in {"render-preview-v2", "render-preview-v2-long", "render-preview-v2-quality"}:
         render_preview_v2_stage(config)
         return 0
-    if command in {"all-v2", "all-v2-long"}:
+    if command in {"all-v2", "all-v2-long", "all-v2-quality"}:
         v2_state = run_v2_analysis_pipeline(config)
         if dry_run:
             return 0

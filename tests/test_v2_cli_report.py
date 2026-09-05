@@ -95,16 +95,58 @@ def test_v2_commands_are_exposed():
     choices = parser._subparsers._group_actions[0].choices
     assert {"all-v2", "render-preview-v2", "verify-preview-v2"} <= set(choices)
     assert {"all-v2-long", "render-preview-v2-long", "verify-preview-v2-long"} <= set(choices)
+    assert {"all-v2-quality", "render-preview-v2-quality", "verify-preview-v2-quality"} <= set(choices)
 
 
 def test_long_profile_raises_only_its_bounded_search_budget():
     base = main.load_config(main.PROJECT_ROOT / "config.yaml")
     long_config = main._long_v2_config(base)
 
-    assert long_config.preview_min_duration == 60.0
+    assert long_config.preview_min_duration == 45.0
     assert long_config.preview_max_duration == 90.0
     assert long_config.beam_max_expansions >= 32768
     assert base.beam_max_expansions == 8192
+
+
+def test_long_profile_has_a_quality_floor_for_saved_sequences():
+    base = main.load_config(main.PROJECT_ROOT / "config.yaml")
+    long_config = main._long_v2_config(base)
+
+    assert long_config.v2_min_shots == 3
+    assert long_config.v2_max_shots == 8
+    assert long_config.v2_short_clip_max_duration == 30.0
+    assert long_config.v2_short_clip_prior == 0.85
+
+
+def test_quality_profile_is_longer_and_isolated_from_v4():
+    base = main.load_config(main.PROJECT_ROOT / "config.yaml")
+    quality = main._quality_v2_config(base)
+    legacy_long = main._long_v2_config(base)
+
+    assert quality.preview_min_duration == 120.0
+    assert quality.preview_max_duration == 150.0
+    assert 10 <= quality.v2_min_shots <= quality.v2_max_shots <= 24
+    assert quality.v2_music_window_policy == "representative"
+    assert quality.v2_output_name == "preview_quality_v5.mp4"
+    assert quality.v5_profile == "quality"
+    assert quality.v5_min_verified_kills_per_shot == 1
+    assert quality.preview_v2_analysis_dir.name == "preview_v5"
+    assert legacy_long.v2_output_name == "preview_quality_v4.mp4"
+
+
+def test_quality_cache_loader_upgrades_stale_saved_clip_prior(tmp_path):
+    base = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"), work_dir=tmp_path)
+    quality = main._quality_v2_config(base)
+    row = _unscored_rapid_variant(tmp_path).to_dict()
+    row["human_selection_prior"] = 0.42
+    row["environment_signature"] = "short_clip"
+
+    loaded = main._variant_from_dict(row, quality)
+
+    assert loaded.human_selection_prior == pytest.approx(quality.v2_short_clip_prior)
+    row["environment_signature"] = "long_clip"
+    non_saved = main._variant_from_dict(row, quality)
+    assert non_saved.human_selection_prior == pytest.approx(0.42)
 
 
 def test_report_contains_baseline_and_event_metrics(tmp_path):
@@ -200,6 +242,33 @@ def test_current_key_unscored_v2_artifact_is_not_a_cache_hit(tmp_path, fake_tool
     config.dedupe_summary_v2_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
 
     assert main._v2_artifact_cache_hit(config, key) is False
+
+
+def test_cached_variants_overlapping_editorial_exclusion_are_not_accepted(tmp_path):
+    base = replace(main.load_config(Path(__file__).parents[1] / "config.yaml"), work_dir=tmp_path)
+    quality = main._quality_v2_config(base)
+    excluded_source = Path("D:/captures/training.mp4")
+    segment = SourceSegment(excluded_source, 50.0, 55.0, 5.0)
+    event = _event("kill", "kill", 52.0, 0.9)
+    variant = CandidateVariant(
+        variant_id="excluded", parent_candidate_id="candidate", source_file=excluded_source,
+        source_segments=(segment,), duration=5.0, human_selection_prior=0.8,
+        payoff_score=0.9, combat_intensity=0.8, action_density=0.8, continuity=0.9,
+        visual_novelty=0.8, motion=0.8, audio_activity=0.8, danger_score=0.8,
+        uniqueness=0.8, final_score=0.8, duplicate_group="group", payoff_events=(event,),
+        primary_anchor=event, secondary_anchors=(), anchor_event_time=52.0,
+        anchor_event_type="kill", anchor_event_strength=0.9, anchor_event_confidence=0.9,
+        context_integrity_score=1.0, penalty_values={}, source_signature="source",
+        environment_signature="long_clip", weapon_or_view_signature="rifle",
+        condense_reason="", rationale="test",
+    )
+    restricted = replace(quality, v2_excluded_ranges=(("training.mp4", 49.0, 55.0, "training_range"),))
+    kept, removed = main._filter_cached_variants_by_editorial_exclusions([variant], restricted)
+    assert kept == []
+    assert removed == 1
+    kept, removed = main._filter_cached_variants_by_editorial_exclusions([variant], quality)
+    assert kept == [variant]
+    assert removed == 0
 
 
 def test_detector_input_changes_invalidate_cached_v2_events_and_variants(tmp_path, fake_toolchain):

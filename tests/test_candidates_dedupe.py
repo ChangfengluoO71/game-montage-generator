@@ -61,7 +61,7 @@ def test_short_clip_gets_human_selection_prior_without_fragmentation(short_recor
     candidates = generate_candidates([short_record], {str(short_record.file_path): analysis}, base_config)
 
     assert len(candidates) == 1
-    assert candidates[0].human_selection_score >= 0.30
+    assert candidates[0].human_selection_score == 0.85
     assert candidates[0].duration >= 10.0
 
 

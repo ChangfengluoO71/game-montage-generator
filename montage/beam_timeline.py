@@ -15,6 +15,7 @@ from .models import (
     V2EditShot,
 )
 from .transitions import choose_anchor_music_target, choose_v2_transition
+from .ranking import verified_kill_events
 
 
 _CONDENSE_GAP_REASONS = frozenset({
@@ -253,7 +254,16 @@ def expand_beam(state: BeamState, variants: Sequence[CandidateVariant], music: M
     by the caller, the cap applies to the whole search rather than each state.
     """
     options: list[BeamState] = []
-    for variant in sorted(variants, key=lambda item: (-item.final_score, item.variant_id)):
+    for variant in sorted(
+        variants,
+        key=lambda item: (
+            -item.final_score,
+            -float(item.score_components.get("verified_kill_count", 0.0)),
+            -float(item.score_components.get("kill_density", 0.0)),
+            -item.human_selection_prior,
+            item.variant_id,
+        ),
+    ):
         limit = config.beam_max_expansions if expansion_budget is None else expansion_budget
         if expansion_counter is not None:
             limit -= expansion_counter[0]
@@ -264,12 +274,32 @@ def expand_beam(state: BeamState, variants: Sequence[CandidateVariant], music: M
             continue
         if any(shot.variant_id == variant.variant_id for shot in state.shots):
             continue
+        if (
+            config.v5_min_verified_kills_per_shot > 0
+            and len(verified_kill_events(variant.payoff_events, config)) < config.v5_min_verified_kills_per_shot
+        ):
+            continue
         if state.elapsed + variant.duration > config.preview_max_duration + 1e-6:
             continue
-        long_run = len(state.shots) >= 2 and all(shot.duration > config.preferred_macro_duration[1] for shot in state.shots[-2:])
-        if variant.duration > config.preferred_macro_duration[1] and long_run:
+        long_run = len(state.shots) >= 2 and all(
+            shot.duration > config.preferred_macro_duration[1]
+            and not _is_preserved_short_shot(shot, config)
+            for shot in state.shots[-2:]
+        )
+        if (
+            variant.duration > config.preferred_macro_duration[1]
+            and long_run
+            and not _is_preserved_short_variant(variant, config)
+        ):
             continue
-        if not _duration_allowed(variant.duration, variant.anchor_event_type, variant.condense_reason, variant.context_integrity_score, config):
+        if not _duration_allowed(
+            variant.duration,
+            variant.anchor_event_type,
+            variant.condense_reason,
+            variant.context_integrity_score,
+            config,
+            preserved_short_clip=_is_preserved_short_variant(variant, config),
+        ):
             continue
         if expansion_counter is not None:
             expansion_counter[0] += 1
@@ -287,7 +317,14 @@ def expand_beam(state: BeamState, variants: Sequence[CandidateVariant], music: M
             cut_sync_offsets=state.cut_sync_offsets + (shot.cut_sync_offset,),
             expansions=state.expansions + 1,
         ))
-    bounded = sorted(options, key=lambda item: item.score, reverse=True)[:max(1, config.beam_width)]
+    bounded = sorted(
+        options,
+        key=lambda item: (
+            -item.score,
+            -sum(float(shot.candidate_score) for shot in item.shots[-1:]),
+            item.shots[-1].variant_id,
+        ),
+    )[:max(1, config.beam_width)]
     # Reserve a beam lane for a quality-comparable Hero candidate so the explicit
     # closing-shot comparison can still be made after later expansions.
     if bounded:
@@ -315,7 +352,7 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
     for _ in range(max(1, config.v2_max_shots)):
         next_states: list[BeamState] = []
         for state in states:
-            if len(state.shots) >= 8 and config.preview_min_duration <= state.elapsed <= target_max:
+            if len(state.shots) >= config.v2_min_shots and config.preview_min_duration <= state.elapsed <= target_max:
                 completed.append(state)
             if len(state.shots) < config.v2_max_shots and state.elapsed < target_max - 1e-6:
                 next_states.extend(expand_beam(state, variants, music, config, baseline_music_in=selected_music_in,
@@ -326,11 +363,17 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
                     break
         if not next_states:
             break
-        states = sorted(next_states, key=lambda item: item.score, reverse=True)[:max(1, config.beam_width)]
-    completed.extend(state for state in states if len(state.shots) >= 8 and config.preview_min_duration <= state.elapsed <= target_max)
+        states = sorted(
+            next_states,
+            key=lambda item: (-item.score, -item.elapsed, tuple(shot.variant_id for shot in item.shots)),
+        )[:max(1, config.beam_width)]
+    completed.extend(
+        state for state in states
+        if len(state.shots) >= config.v2_min_shots and config.preview_min_duration <= state.elapsed <= target_max
+    )
     if not completed:
         raise ValueError(
-            f"unable to build an 8-{config.v2_max_shots} shot V2 preview within "
+            f"unable to build a {config.v2_min_shots}-{config.v2_max_shots} shot V2 preview within "
             f"{config.preview_min_duration:g}-{config.preview_max_duration:g} seconds"
         )
     best = max(completed, key=lambda state: (state.score, sum(shot.context_integrity_score for shot in state.shots),
@@ -344,7 +387,7 @@ def build_v2_preview_edit(variants: Sequence[CandidateVariant], music: MusicAnal
             best = max(comparable_heroes, key=lambda state: (state.score, _closing_quality(state.shots[-1])))
     shots = tuple(replace(shot, section=_section(shot.timeline_in, best.elapsed, shot is best.shots[-1])) for shot in best.shots)
     edit = V2EditDecisionList(
-        kind="preview_v2", music_source=baseline_edit.music_source,
+        kind="preview_v5" if config.v5_profile == "quality" else "preview_v2", music_source=baseline_edit.music_source,
         baseline_music_in=baseline_edit.music_in, baseline_music_out=baseline_edit.music_out,
         music_in=selected_music_in, music_out=selected_music_out,
         duration=best.elapsed, music_reason=music_reason,
@@ -378,10 +421,15 @@ def _closing_quality(shot: V2EditShot) -> float:
 
 
 def _duration_allowed(duration: float, anchor_type: str | None, condense_reason: str,
-                      context_integrity: float, config: PipelineConfig) -> bool:
+                      context_integrity: float, config: PipelineConfig,
+                      *, preserved_short_clip: bool = False) -> bool:
     """Apply preferred macro bounds, with an explicit context-safe long-shot exception."""
     low, high = config.preferred_macro_duration
-    if duration < low - 0.001 or duration > config.hero_max_duration + 0.001:
+    if duration < low - 0.001:
+        return False
+    if preserved_short_clip:
+        return duration <= config.v2_short_clip_max_duration + 0.001
+    if duration > config.hero_max_duration + 0.001:
         return False
     if duration <= high + 0.001:
         return True
@@ -391,8 +439,8 @@ def _duration_allowed(duration: float, anchor_type: str | None, condense_reason:
 
 def validate_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
     """Raise ValueError for edits that cannot safely proceed to a future renderer."""
-    if not 8 <= len(edit.shots) <= config.v2_max_shots:
-        raise ValueError(f"V2 edit must contain 8-{config.v2_max_shots} macro shots")
+    if not config.v2_min_shots <= len(edit.shots) <= config.v2_max_shots:
+        raise ValueError(f"V2 edit must contain {config.v2_min_shots}-{config.v2_max_shots} macro shots")
     if not config.preview_min_duration <= edit.duration <= config.preview_max_duration:
         raise ValueError(
             f"V2 edit duration must be in the {config.preview_min_duration:g}-"
@@ -440,13 +488,48 @@ def validate_v2_edit(edit: V2EditDecisionList, config: PipelineConfig) -> None:
             raise ValueError("rationale is required")
         if shot.primary_anchor is None:
             raise ValueError("payoff anchor is required")
+        if config.v5_min_verified_kills_per_shot > 0:
+            verified = {event.event_id for event in verified_kill_events(shot.payoff_events, config)}
+            if (
+                len(verified) < config.v5_min_verified_kills_per_shot
+                or shot.primary_anchor.event_id not in verified
+            ):
+                raise ValueError("verified kill anchor is required for the quality profile")
         if shot.transition != "hard_cut":
             raise ValueError("V2 selection must use hard cuts")
-        if not _duration_allowed(shot.duration, shot.anchor_event_type, shot.condense_reason, shot.context_integrity_score, config):
+        if not _duration_allowed(
+            shot.duration,
+            shot.anchor_event_type,
+            shot.condense_reason,
+            shot.context_integrity_score,
+            config,
+            preserved_short_clip=_is_preserved_short_shot(shot, config),
+        ):
             raise ValueError("shot duration is outside preferred macro or hero limits")
-        long_count = long_count + 1 if shot.duration > config.preferred_macro_duration[1] else 0
+        long_count = long_count + 1 if (
+            shot.duration > config.preferred_macro_duration[1]
+            and not _is_preserved_short_shot(shot, config)
+        ) else 0
         if long_count >= 3:
             raise ValueError("three long segments are not permitted")
         previous_out = shot.timeline_out
     if abs(previous_out - edit.duration) > 0.01:
         raise ValueError("timeline must end at edit duration")
+
+
+def _is_preserved_short_variant(variant: CandidateVariant, config: PipelineConfig) -> bool:
+    return (
+        variant.environment_signature == "short_clip"
+        and len(variant.source_segments) == 1
+        and not variant.condense_reason
+        and variant.duration <= config.v2_short_clip_max_duration + 0.001
+    )
+
+
+def _is_preserved_short_shot(shot: V2EditShot, config: PipelineConfig) -> bool:
+    return (
+        shot.environment_signature == "short_clip"
+        and len(shot.source_segments) == 1
+        and not shot.condense_reason
+        and shot.duration <= config.v2_short_clip_max_duration + 0.001
+    )

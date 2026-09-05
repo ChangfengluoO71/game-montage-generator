@@ -29,8 +29,8 @@ class Toolchain:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ffmpeg": str(self.ffmpeg),
-            "ffprobe": str(self.ffprobe),
+            "ffmpeg": str(self.ffmpeg.resolve(strict=False)),
+            "ffprobe": str(self.ffprobe.resolve(strict=False)),
             "ffmpeg_version": self.ffmpeg_version,
             "ffprobe_version": self.ffprobe_version,
             "nvenc_h264": self.nvenc_h264,

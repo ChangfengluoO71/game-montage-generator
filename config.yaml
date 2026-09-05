@@ -51,17 +51,43 @@ rapid_multikill_window_s: 4.0
 rapid_multikill_min_events: 2
 rapid_multikill_bonus_weight: 0.18
 hero_quality_margin: 0.05
+v2_min_shots: 8
 v2_max_shots: 14
+v2_short_clip_max_duration: 30.0
+v2_short_clip_prior: 0.85
 v2_music_window_policy: baseline
+v5_profile: off
+v5_min_kill_semantic_confidence: 0.80
+v5_min_killfeed_evidence: 0.25
+v5_min_reward_evidence: 0.10
+v5_min_verified_kills_per_shot: 0
+v5_kill_density_window_s: 6.0
+v5_kill_density_target: 4
+v5_kill_count_weight: 0.0
+v5_kill_density_weight: 0.0
+v5_max_sequences_per_candidate: 1
+v5_sequence_context_s: 1.25
+v5_min_rapid_context_tail_s: 0.25
+
+# V6 owns a separate kill-truth path. These values configure only the
+# Personal Kill Feedback Panel scanner; they do not feed legacy ranking.
+v6_profile_id: cfl_bf6_1920x1200_v1
+v6_detector_version: v6-skull-row-5-calibrated-y-gate
+v6_coarse_fps: 12.0
+v6_dense_fps: 60.0
+v6_panel_disappear_s: 0.75
+v6_refinement_radius_s: 1.0
+v6_initial_search_roi: [0.25, 0.42, 0.66, 0.75]
+
 v2_excluded_ranges:
   - source_name: 'Battlefield 6 2026.09.03 - 14.43.43.02.DVR.mp4'
-    start: 49.0
-    end: 55.0
-    reason: training_range
-  - source_name: 'Battlefield 6 2026.09.03 - 14.43.43.02.DVR.mp4'
-    start: 68.667
-    end: 74.667
-    reason: training_range
+    start: 0.0
+    end: 229.0
+    reason: training_range_and_menu_session
+  - source_name: 'Battlefield 6 2026.09.03 - 15.32.51.07.DVR.mp4'
+    start: 0.0
+    end: 999999.0
+    reason: training_range_and_menu_session
 v2_weights:
   payoff_score: 0.25
   human_selection_prior: 0.15
@@ -122,7 +148,17 @@ audio_mix:
   combat_game_boost_db: 2.0
   attack_ms: 50
   release_ms: 500
-  target_lufs: -14.0
-  true_peak_db: -1.0
+  target_lufs: -16.0
+  true_peak_db: -2.0
+  v2_game_gain_db: -6.0
+  v2_music_gain_db: -14.0
+  v2_game_compressor_threshold: 0.18
+  v2_game_compressor_ratio: 3.0
+  v2_game_compressor_attack_ms: 8
+  v2_game_compressor_release_ms: 140
+  v2_game_limiter_limit: 0.60
+  v2_music_duck_threshold: 0.12
+  v2_music_duck_ratio: 1.6
+  v2_music_duck_mix: 0.2
   sample_rate: 48000
   bitrate: 320k

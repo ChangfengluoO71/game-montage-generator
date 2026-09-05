@@ -236,13 +236,29 @@ def _event_windows_overlap(left: CandidateVariant, right: CandidateVariant, wind
     return any(abs(left_event.source_time - right_event.source_time) <= window_s for left_event in left_events for right_event in right_events)
 
 
+def _same_source_event_windows_overlap(left: CandidateVariant, right: CandidateVariant, window_s: float = 4.0) -> bool:
+    """Detect a likely repeated event when separate candidates came from one source."""
+    if left.source_file != right.source_file:
+        return False
+    return _event_windows_overlap(left, right, window_s)
+
+
 def choose_v2_representative(group: Sequence[CandidateVariant], purpose: Literal["fast", "full"]) -> CandidateVariant:
     if not group:
         raise ValueError("Cannot choose a representative from an empty duplicate group")
     if purpose == "fast":
+        def quality_metrics(variant: CandidateVariant) -> tuple[float, float]:
+            components = variant.score_components
+            return (
+                float(components.get("verified_kill_count", 0.0)),
+                float(components.get("kill_density", 0.0)),
+            )
         return max(
             group,
             key=lambda variant: (
+                quality_metrics(variant) if any(
+                    "verified_kill_count" in item.score_components for item in group
+                ) else (0.0, 0.0),
                 variant.human_selection_prior,
                 variant.payoff_score,
                 variant.context_integrity_score,
@@ -262,7 +278,8 @@ def choose_v2_representative(group: Sequence[CandidateVariant], purpose: Literal
 
 
 def deduplicate_variants(
-    variants: Sequence[CandidateVariant], fingerprints: Mapping[str, Sequence[int]], threshold: float
+    variants: Sequence[CandidateVariant], fingerprints: Mapping[str, Sequence[int]], threshold: float,
+    *, strict_source_overlap: bool = False,
 ) -> V2DedupeResult:
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("dedupe threshold must be in [0, 1]")
@@ -290,7 +307,13 @@ def deduplicate_variants(
                 fingerprints.get(left.variant_id, ()), fingerprints.get(right.variant_id, ())
             )
             similarity[pair] = round(visual_similarity, 6)
-            if left.parent_candidate_id == right.parent_candidate_id and _source_segments_overlap(left, right):
+            if strict_source_overlap and _source_segments_overlap(left, right):
+                union(left_index, right_index)
+                forced_reasons[pair] = "same_source_overlap"
+            elif strict_source_overlap and _same_source_event_windows_overlap(left, right):
+                union(left_index, right_index)
+                forced_reasons[pair] = "same_source_event_window_overlap"
+            elif left.parent_candidate_id == right.parent_candidate_id and _source_segments_overlap(left, right):
                 union(left_index, right_index)
                 forced_reasons[pair] = "same_parent_source_overlap"
             elif left.parent_candidate_id == right.parent_candidate_id and _event_windows_overlap(left, right):

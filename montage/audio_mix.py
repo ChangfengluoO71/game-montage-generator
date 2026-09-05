@@ -31,18 +31,29 @@ def build_v2_audio_filter(
     release_ms: int = 500,
     target_lufs: float = -14.0,
     true_peak_db: float = -1.0,
+    game_compressor_threshold: float = 0.18,
+    game_compressor_ratio: float = 3.0,
+    game_compressor_attack_ms: int = 8,
+    game_compressor_release_ms: int = 140,
+    game_limiter_limit: float = 0.60,
+    music_duck_threshold: float = 0.12,
+    music_duck_ratio: float = 1.6,
+    music_duck_mix: float = 0.2,
 ) -> str:
-    """Build a gameplay-first mix; the game bus is never ducked or gated."""
+    """Build a gameplay-first mix with a fixed low music floor and controlled game peaks."""
     if duration <= 0:
         raise ValueError("audio duration must be positive")
     return (
-        f"[{game_label}]aresample=48000,volume={game_gain_db:.3f}dB[game_bus];"
+        f"[{game_label}]aresample=48000,volume={game_gain_db:.3f}dB,"
+        f"acompressor=threshold={game_compressor_threshold:.3f}:ratio={game_compressor_ratio:.3f}:"
+        f"attack={int(game_compressor_attack_ms)}:release={int(game_compressor_release_ms)}:makeup=1,"
+        f"alimiter=limit={game_limiter_limit:.3f}:attack=5:release=80:level=0[game_bus];"
         "[game_bus]asplit=2[game_sidechain][game_mix];"
         f"[{music_label}]aresample=48000,atrim=duration={duration:.3f},"
         f"volume={music_gain_db:.3f}dB[music_bus];"
         "[music_bus][game_sidechain]sidechaincompress="
-        f"threshold=0.035:ratio=4.0:attack={int(attack_ms)}:release={int(release_ms)}:"
-        "makeup=1:mix=1[ducked_music];"
+        f"threshold={music_duck_threshold:.3f}:ratio={music_duck_ratio:.3f}:"
+        f"attack={int(attack_ms)}:release={int(release_ms)}:makeup=1:mix={music_duck_mix:.3f}[ducked_music];"
         "[game_mix][ducked_music]amix=inputs=2:duration=longest:"
         "dropout_transition=0:normalize=0,"
         f"loudnorm=I={target_lufs:.1f}:TP={true_peak_db:.1f},"

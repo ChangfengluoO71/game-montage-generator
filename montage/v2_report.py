@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .cache import atomic_write_json
+from .config import PipelineConfig
 from .models import CandidateVariant, EditDecisionList, V2EditDecisionList
+from .ranking import verified_kill_events
 
 
 def _stats(values: Sequence[float]) -> dict[str, float]:
@@ -53,7 +55,7 @@ def _metric_pair(v1: object, v2: object) -> dict[str, object]:
 
 
 def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookback_window: int = 2,
-                  penalty_metrics_unavailable: bool = False) -> dict[str, object]:
+                  penalty_metrics_unavailable: bool = False, config: PipelineConfig | None = None) -> dict[str, object]:
     durations = _shot_durations(edit)
     shots = list(getattr(edit, "shots", ()))
     event = _stats([getattr(shot, "event_sync_offset", getattr(shot, "sync_offset", 0.0)) for shot in shots])
@@ -74,6 +76,13 @@ def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookb
             for previous in shots[max(0, index - max(1, int(lookback_window))):index]
         )
     )
+    if config is not None:
+        verified_counts = [len(verified_kill_events(getattr(shot, "payoff_events", ()), config)) for shot in shots]
+    else:
+        verified_counts = [
+            sum(1 for event_item in getattr(shot, "payoff_events", ()) if event_item.type in {"kill", "multikill"})
+            for shot in shots
+        ]
     return {
         "macro_shot_count": len(shots),
         "average_shot_duration": statistics.fmean(durations) if durations else 0.0,
@@ -94,15 +103,21 @@ def _edit_metrics(edit: Any, *, variants: Sequence[CandidateVariant] = (), lookb
         "repetitive_fire_ratio": _ratio(variants, "repetitive_fire", unavailable=penalty_metrics_unavailable),
         "same_environment_consecutive_count": same_env,
         "same_source_recent_penalty_count": same_source_recent,
+        "verified_kill_count": sum(verified_counts),
+        "verified_kill_shot_count": sum(1 for count in verified_counts if count > 0),
+        "verified_kill_density_per_10s": (
+            sum(verified_counts) / max(0.001, float(getattr(edit, "duration", 0.0))) * 10.0
+        ),
     }
 
 
 def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
                          variants: Sequence[CandidateVariant], rejected: dict[str, int],
                          *, lookback_window: int = 2,
-                         editorial_exclusions: Sequence[tuple[str, float, float, str]] = ()) -> dict[str, object]:
+                         editorial_exclusions: Sequence[tuple[str, float, float, str]] = (),
+                         config: PipelineConfig | None = None) -> dict[str, object]:
     rapid_scores = [float(getattr(variant, "rapid_multikill_score", 0.0)) for variant in variants]
-    v2 = _edit_metrics(edit, variants=variants, lookback_window=lookback_window)
+    v2 = _edit_metrics(edit, variants=variants, lookback_window=lookback_window, config=config)
     v1 = _edit_metrics(baseline, lookback_window=lookback_window, penalty_metrics_unavailable=True)
     comparison_keys = tuple(v2)
     comparisons = {key: _metric_pair(v1[key], v2[key]) for key in comparison_keys}
@@ -124,8 +139,29 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
         normalized = str(key)
         comparison_name = normalized if normalized.startswith("rejected_by_") else f"rejected_by_{normalized}"
         comparisons.setdefault(comparison_name, _metric_pair(None, int(value)))
+    variant_by_id = {variant.variant_id: variant for variant in variants}
+    selected_candidates = []
+    for shot in edit.shots:
+        selected_variant = variant_by_id.get(getattr(shot, "variant_id", ""))
+        verified_count = len(verified_kill_events(shot.payoff_events, config)) if config is not None else sum(
+            1 for event_item in shot.payoff_events if event_item.type in {"kill", "multikill"}
+        )
+        selected_candidates.append({
+            "variant_id": shot.variant_id,
+            "parent_candidate_id": shot.parent_candidate_id,
+            "source": str(shot.source),
+            "source_in": float(shot.source_in),
+            "source_out": float(shot.source_out),
+            "duration": float(shot.duration),
+            "score": float(shot.candidate_score),
+            "duplicate_group": shot.duplicate_group,
+            "verified_kill_count": verified_count,
+            "kill_density": float((selected_variant.score_components if selected_variant else {}).get("kill_density", 0.0)),
+            "rationale": shot.rationale,
+        })
     report: dict[str, object] = {
-        "report_version": "v2-sync-1",
+        "report_version": "v2-sync-2",
+        "profile": config.v5_profile if config is not None else "baseline",
         "diagnostic_evidence": True,
         "baseline_music_range": [float(baseline.music_in), float(baseline.music_out)],
         "v2_music_range": [float(edit.music_in), float(edit.music_out)],
@@ -142,10 +178,19 @@ def build_v2_sync_report(edit: V2EditDecisionList, baseline: EditDecisionList,
         ],
         "dedupe": {"unique_duplicate_groups": len({shot.duplicate_group for shot in edit.shots if shot.duplicate_group}),
                     "selected_shots": len(edit.shots)},
+        "selected_candidates": selected_candidates,
+        "quality_gate": {
+            "minimum_verified_kills_per_shot": config.v5_min_verified_kills_per_shot if config is not None else 0,
+            "verified_kills_required": bool(config is not None and config.v5_min_verified_kills_per_shot > 0),
+        },
         "rapid_multikill": {"candidate_count": sum(1 for value in rapid_scores if value > 0),
                              "score_sum": sum(rapid_scores),
                              "bonus_sum": sum(float(getattr(variant, "rapid_multikill_bonus", 0.0)) for variant in variants)},
-        "audio_strategy": "continuous music; gameplay audio retained with conservative J/L overlap",
+        "audio_strategy": (
+            "continuous low-floor background music at the configured V2 gain; "
+            "gameplay audio retained after conservative bus compression and limiting; "
+            "only subtle transient ducking and conservative J/L overlap"
+        ),
         "transition_strategy": "hard cuts; compatibility is selection metadata only",
         "caveats": ["Metrics are diagnostic evidence, not semantic ground truth.",
                     "Phrase and section labels are heuristic.",
@@ -163,7 +208,8 @@ def write_v2_report(report: dict[str, object], path: Path) -> None:
 
 def render_v2_markdown_report(report: dict[str, object], path: Path, *, toolchain: Any = None,
                               output: Path | None = None) -> None:
-    lines = ["# Battlefield Montage V2 Preview Report", "", "Diagnostic evidence for V1/V2 A/B review.", ""]
+    profile = str(report.get("profile", "baseline"))
+    lines = [f"# Battlefield Montage V2 Preview Report ({profile})", "", "Diagnostic evidence for V1/V2 A/B review.", ""]
     music_in = report.get("music_in")
     music_out = report.get("music_out")
     lines.extend([

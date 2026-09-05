@@ -4,4 +4,5 @@ librosa
 soundfile
 matplotlib
 PyYAML
+opencv-python
 pytest

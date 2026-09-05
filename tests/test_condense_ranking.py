@@ -13,7 +13,12 @@ from montage.condense import (
 from montage.candidate import generate_candidates, write_candidates
 from montage.config import load_config
 from montage.models import Candidate, CandidateVariant, MediaRecord, MusicAnalysis, PayoffEvent, SourceSegment, VideoAnalysis
-from montage.ranking import calculate_penalties, score_variant
+from montage.ranking import (
+    calculate_penalties,
+    max_verified_kills_in_window,
+    score_variant,
+    verified_kill_events,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +40,23 @@ def make_event(event_id, source_time, confidence, strength=None, event_type="com
         strength=confidence if strength is None else strength,
         semantic_confidence=0.9 if event_type in {"kill", "multikill", "vehicle_destroy", "objective"} else 0.2,
         evidence={"motion_peak": confidence, "audio_transient": strength or confidence},
+    )
+
+
+def make_verified_event(event_id, source_time, event_type="kill", confidence=0.92, strength=0.92):
+    return PayoffEvent(
+        event_id=event_id,
+        type=event_type,
+        source_time=source_time,
+        confidence=confidence,
+        strength=strength,
+        semantic_confidence=0.92,
+        evidence={
+            "killfeed_change": 0.92,
+            "reward_roi_change": 0.92,
+            "motion_peak": strength,
+            "audio_transient": strength,
+        },
     )
 
 
@@ -127,8 +149,31 @@ def test_condensed_variant_preserves_saved_short_clip_prior_and_anchor_context()
     assert context_integrity_score(candidate, variant.primary_anchor, variant.source_segments) >= test_config().minimum_context_integrity
 
 
+def test_saved_short_clip_keeps_complete_continuous_sequence():
+    candidate = replace(
+        make_long_candidate(),
+        source_category="short_clip",
+        source_start=0.0,
+        source_end=20.0,
+        duration=20.0,
+        human_selection_score=0.85,
+    )
+    events = [
+        make_event("saved-1", 4.0, 0.86, 0.86, "kill"),
+        make_event("saved-2", 6.0, 0.90, 0.90, "kill"),
+        make_event("saved-3", 10.0, 0.92, 0.92, "multikill"),
+    ]
+
+    variant = build_condensed_variants(candidate, events, make_music(), test_config())[0]
+
+    assert variant.source_segments == (SourceSegment(candidate.source_file, 0.0, 20.0, 20.0),)
+    assert variant.duration == 20.0
+    assert variant.human_selection_prior == 0.85
+    assert "complete" in variant.rationale.lower()
+
+
 def test_rapid_kill_condense_keeps_the_complete_short_sequence():
-    candidate = make_long_candidate()
+    candidate = replace(make_long_candidate(), source_category="long_clip")
     events = [
         make_event("kill-1", 10.0, 0.86, 0.86, "kill"),
         make_event("kill-2", 11.2, 0.88, 0.88, "kill"),
@@ -172,6 +217,149 @@ def test_boundary_anchor_falls_back_to_original_continuous_range():
     assert context_integrity_score(candidate, anchor, (unsafe_segment,)) < test_config().minimum_context_integrity
     variant = build_condensed_variants(candidate, [anchor], make_music(), test_config())[0]
     assert variant.source_segments == (SourceSegment(candidate.source_file, 0.0, 20.0, 20.0),)
+
+
+def test_quality_rapid_window_accepts_source_end_after_three_decimal_rounding(base_config):
+    candidate = replace(
+        make_long_candidate(),
+        source_category="long_clip",
+        source_start=0.0,
+        source_end=20.0,
+        duration=20.0,
+    )
+    config = replace(
+        base_config,
+        v5_profile="quality",
+        v5_min_verified_kills_per_shot=1,
+        v5_min_rapid_context_tail_s=0.25,
+        v5_sequence_context_s=1.0,
+        v5_max_sequences_per_candidate=3,
+    )
+    events = [
+        make_verified_event("edge-1", 18.0),
+        make_verified_event("edge-2", 19.001),
+    ]
+
+    variants = build_condensed_variants(candidate, events, make_music(), config)
+
+    assert variants
+    assert len(variants[0].source_segments) == 1
+    assert variants[0].source_segments[0].source_out == pytest.approx(20.0)
+    assert {event.event_id for event in variants[0].payoff_events} == {"edge-1", "edge-2"}
+
+
+def test_quality_long_saved_clip_yields_multiple_non_overlapping_rapid_sequences(base_config):
+    candidate = replace(
+        make_long_candidate(),
+        source_category="short_clip",
+        source_start=0.0,
+        source_end=70.0,
+        duration=70.0,
+        human_selection_score=0.85,
+    )
+    config = replace(
+        base_config,
+        v5_profile="quality",
+        v5_min_verified_kills_per_shot=1,
+        v5_max_sequences_per_candidate=4,
+        v5_kill_density_window_s=6.0,
+        v5_sequence_context_s=1.25,
+    )
+    events = [
+        make_verified_event("cluster-a1", 4.0),
+        make_verified_event("cluster-a2", 5.2),
+        make_verified_event("cluster-a3", 6.4, "multikill"),
+        make_verified_event("cluster-b1", 35.0),
+        make_verified_event("cluster-b2", 36.1),
+        make_verified_event("cluster-b3", 37.4, "multikill"),
+    ]
+
+    variants = build_condensed_variants(candidate, events, make_music(), config)
+
+    assert len(variants) >= 2
+    assert all(len(variant.source_segments) == 1 for variant in variants)
+    ranges = [(variant.source_segments[0].source_in, variant.source_segments[0].source_out) for variant in variants]
+    assert all(left[1] <= right[0] or right[1] <= left[0] for index, left in enumerate(ranges) for right in ranges[index + 1:])
+    assert all("verified kills" in variant.rationale.lower() for variant in variants)
+    assert all("trim" in variant.rationale.lower() for variant in variants)
+
+
+def test_quality_short_saved_clip_trims_non_event_head_before_rapid_kills(base_config):
+    candidate = replace(
+        make_long_candidate(),
+        source_category="short_clip",
+        source_start=0.0,
+        source_end=11.4,
+        duration=11.4,
+        human_selection_score=0.85,
+    )
+    config = replace(
+        base_config,
+        v5_profile="quality",
+        v5_min_verified_kills_per_shot=1,
+        v5_sequence_context_s=1.25,
+        v5_min_rapid_context_tail_s=0.20,
+    )
+    events = [
+        make_verified_event("late-1", 7.0),
+        make_verified_event("late-2", 8.1),
+        make_verified_event("late-3", 9.2, "multikill"),
+    ]
+
+    variants = build_condensed_variants(candidate, events, make_music(), config)
+
+    assert variants
+    segment = variants[0].source_segments[0]
+    assert segment.source_in == pytest.approx(5.75)
+    assert segment.source_out == pytest.approx(10.45)
+    assert segment.duration < candidate.duration
+    assert "trimmed" in variants[0].rationale.lower()
+
+
+def test_verified_kill_filter_requires_correlated_evidence(base_config):
+    generic = make_event("generic", 1.0, 0.99, 0.99, "combat_climax")
+    weak_feed = replace(
+        make_verified_event("weak-feed", 2.0),
+        evidence={"killfeed_change": 0.10, "reward_roi_change": 0.92},
+    )
+    corroborated = make_verified_event("corroborated", 3.0, "multikill")
+
+    verified = verified_kill_events([generic, weak_feed, corroborated], base_config)
+
+    assert [event.event_id for event in verified] == ["corroborated"]
+
+
+def test_quality_score_prefers_verified_kill_count_and_density(base_config):
+    candidate = make_long_candidate()
+    base = build_condensed_variants(candidate, [], make_music(), base_config)[0]
+    sparse = replace(
+        base,
+        variant_id="sparse",
+        payoff_events=(make_verified_event("sparse-kill", 5.0),),
+    )
+    dense = replace(
+        base,
+        variant_id="dense",
+        payoff_events=tuple(make_verified_event(f"dense-{index}", 5.0 + index * 0.75) for index in range(4)),
+    )
+    quality = replace(
+        base_config,
+        v5_profile="quality",
+        v5_kill_count_weight=0.20,
+        v5_kill_density_weight=0.35,
+        v5_kill_density_window_s=6.0,
+        v5_kill_density_target=4,
+        rapid_multikill_bonus_weight=0.0,
+    )
+
+    scored_sparse = score_variant(sparse, quality)
+    scored_dense = score_variant(dense, quality)
+
+    assert scored_dense.final_score > scored_sparse.final_score
+    assert scored_dense.score_components["verified_kill_count"] == 4.0
+    assert scored_dense.score_components["kill_density"] == pytest.approx(1.0)
+    assert base_config.v5_kill_count_weight == 0.0
+    assert base_config.v5_kill_density_weight == 0.0
 
 
 def test_generated_variant_uses_explicit_feature_runs_for_penalties():

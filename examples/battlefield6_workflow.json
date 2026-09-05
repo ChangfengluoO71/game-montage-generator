@@ -1,0 +1,18 @@
+{
+  "schema": "game-montage-workflow-v1",
+  "game_id": "battlefield_6",
+  "display_name": "Battlefield 6",
+  "detector": {
+    "detector_type": "skull_row",
+    "event_label": "OWN_KILL",
+    "roi": {"coordinate_space": "normalized", "x1": 0.30, "y1": 0.55, "x2": 0.48, "y2": 0.74},
+    "templates": [{"kind": "normal_kill", "file": "templates/normal_01.png"}, {"kind": "headshot", "file": "templates/headshot_01.png"}],
+    "positive_samples": ["samples/full_frame_positive_01.png"],
+    "negative_samples": ["samples/full_frame_negative_01.png"],
+    "thresholds": {"template": 0.65, "geometry": 0.65, "shape": 0.36, "color": 0.12}
+  },
+  "edit_rules": {"event_pre_seconds": 1.5, "event_post_seconds": 0.5, "merge_gap_seconds": 2.0, "long_gap_bridge_seconds": 2.0, "fade_to_black_seconds": 5.0},
+  "audio_output": {"game_gain_db": -6.0, "music_gain_db": -14.0, "target_lufs": -16.0, "true_peak_db": -2.0, "sample_rate": 48000, "channels": 2},
+  "profiles": [{"profile_id": "cfl_bf6_1920x1200_v1", "width": 1920, "height": 1200}, {"profile_id": "cfl_bf6_2560x1440_v1", "width": 2560, "height": 1440}],
+  "metadata": {"exportable": true, "raw_is_read_only": true}
+}

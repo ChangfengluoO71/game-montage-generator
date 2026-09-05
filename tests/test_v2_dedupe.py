@@ -48,6 +48,19 @@ def variant(
     )
 
 
+def test_quality_representative_keeps_verified_kill_density_before_saved_prior():
+    saved_short = replace(
+        variant("saved-short", "parent", 0.0, 6.0, human=0.9, payoff=0.1, context=0.1, score=0.1),
+        score_components={"verified_kill_count": 1.0, "kill_density": 0.25},
+    )
+    denser = replace(
+        variant("denser", "parent", 0.0, 8.0, human=0.1, payoff=0.8, context=0.8, score=0.8),
+        score_components={"verified_kill_count": 3.0, "kill_density": 0.75},
+    )
+
+    assert choose_v2_representative((saved_short, denser), "fast") is denser
+
+
 def test_fast_representative_retains_saved_short_before_quality_metrics():
     saved_short = variant("saved-short", "parent", 0.0, 6.0, human=0.9, payoff=0.1, context=0.1, score=0.1)
     stronger_variant = variant("stronger", "parent", 0.0, 8.0, human=0.1, payoff=1.0, context=1.0, score=1.0)
@@ -64,6 +77,19 @@ def test_same_parent_overlapping_windows_are_forced_into_one_group_with_reason()
     assert len(result.groups) == 1
     assert result.similarity["left:right"] == 0.0
     assert result.forced_source_overlap_reasons == {"left:right": "same_parent_source_overlap"}
+
+
+def test_quality_dedupe_forces_overlapping_windows_from_different_candidates():
+    left = variant("left", "parent-a", 0.0, 6.0)
+    right = variant("right", "parent-b", 4.0, 10.0)
+
+    result = deduplicate_variants(
+        (left, right), {"left": [0], "right": [(1 << 56) - 1]}, threshold=0.78,
+        strict_source_overlap=True,
+    )
+
+    assert len(result.groups) == 1
+    assert result.forced_source_overlap_reasons == {"left:right": "same_source_overlap"}
 
 
 def test_v2_dedupe_summary_reports_threshold_and_representatives(tmp_path):

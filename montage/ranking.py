@@ -16,6 +16,45 @@ def _clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def verified_kill_events(events: Sequence[PayoffEvent], config: PipelineConfig) -> tuple[PayoffEvent, ...]:
+    """Return only kill labels with the corroboration required by the quality profile.
+
+    A generic combat climax or a lone kill-feed change is not sufficient.  The
+    event must retain both the kill-feed and reward-ROI evidence so the V5 gate
+    cannot be satisfied by a noisy visual transient.
+    """
+    unique: dict[str, PayoffEvent] = {}
+    for event in events:
+        if event.type not in {"kill", "multikill"}:
+            continue
+        if event.semantic_confidence < config.v5_min_kill_semantic_confidence:
+            continue
+        if event.evidence.get("killfeed_change", 0.0) < config.v5_min_killfeed_evidence:
+            continue
+        if event.evidence.get("reward_roi_change", 0.0) < config.v5_min_reward_evidence:
+            continue
+        unique[event.event_id] = event
+    return tuple(sorted(unique.values(), key=lambda event: (event.source_time, event.event_id)))
+
+
+def max_verified_kills_in_window(
+    events: Sequence[PayoffEvent], window_s: float, config: PipelineConfig
+) -> int:
+    """Return the largest corroborated kill count inside one compact time window."""
+    qualifying = verified_kill_events(events, config)
+    window = max(0.0, float(window_s))
+    if not qualifying or window <= 0.0:
+        return 0
+    best = 0
+    for index, first in enumerate(qualifying):
+        count = sum(
+            1 for event in qualifying[index:]
+            if event.source_time - first.source_time <= window + 1e-9
+        )
+        best = max(best, count)
+    return best
+
+
 def score_candidates(candidates: Sequence[Candidate], config: PipelineConfig) -> list[Candidate]:
     weights = config.weights
     scored: list[Candidate] = []
@@ -115,8 +154,42 @@ def score_variant(variant: CandidateVariant, config: PipelineConfig) -> Candidat
     )
     configured_bonus = max(0.0, min(RAPID_MULTIKILL_MAX_BONUS, float(config.rapid_multikill_bonus_weight)))
     rapid_bonus = round(min(configured_bonus, rapid_score * configured_bonus), 6)
-    components = {**weighted, **penalties, "rapid_multikill_score": rapid_score, "rapid_multikill_bonus": rapid_bonus}
-    final_score = _clamp(sum(weighted.values()) + rapid_bonus - sum(penalties.values()))
+    verified = verified_kill_events(variant.payoff_events, config)
+    verified_count = float(len(verified))
+    density_count = float(max_verified_kills_in_window(
+        variant.payoff_events, config.v5_kill_density_window_s, config
+    ))
+    kill_count_score = _clamp(verified_count / max(1.0, float(config.v5_kill_density_target)))
+    density_score = _clamp(density_count / max(1.0, float(config.v5_kill_density_target)))
+    components = {
+        **weighted,
+        **penalties,
+        "rapid_multikill_score": rapid_score,
+        "rapid_multikill_bonus": rapid_bonus,
+        "verified_kill_count": verified_count,
+        "verified_kill_score": round(kill_count_score, 6),
+        "rapid_kill_count": density_count,
+        "kill_density": round(density_score, 6),
+    }
+    base_score = _clamp(sum(weighted.values()) + rapid_bonus - sum(penalties.values()))
+    if config.v5_profile == "quality":
+        # The quality weights are editorial rebalancing weights, not an extra
+        # bonus stacked on top of the already-normalized V2 score.  Normalize
+        # the base contribution first; otherwise every strong candidate can
+        # saturate at 1.0 and the beam loses the kill-density ordering.
+        kill_weight = min(
+            1.0,
+            max(0.0, float(config.v5_kill_count_weight))
+            + max(0.0, float(config.v5_kill_density_weight)),
+        )
+        final_score = _clamp(
+            base_score * (1.0 - kill_weight)
+            + float(config.v5_kill_count_weight) * kill_count_score
+            + float(config.v5_kill_density_weight) * density_score
+        )
+    else:
+        final_score = base_score
+    components["base_score"] = round(base_score, 6)
     return replace(
         variant,
         final_score=round(final_score, 6),

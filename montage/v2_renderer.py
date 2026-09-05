@@ -242,13 +242,24 @@ def _audio_chain(segment_count: int, edit: V2EditDecisionList, config: PipelineC
         game_label = current_label
         prefix = ";".join(prefix_parts) + ";"
     music_index = segment_count
+    audio = config.audio_mix
     mix = build_v2_audio_filter(
-        game_label, f"{music_index}:a:0", 0.0, float(config.audio_mix.get("music_gain_db", -9.0)),
+        game_label, f"{music_index}:a:0",
+        float(audio.get("v2_game_gain_db", audio.get("game_gain_db", -3.0))),
+        float(audio.get("v2_music_gain_db", audio.get("music_gain_db", -9.0))),
         duration=edit.duration,
-        attack_ms=int(config.audio_mix.get("attack_ms", 50)),
-        release_ms=int(config.audio_mix.get("release_ms", 500)),
-        target_lufs=float(config.audio_mix.get("target_lufs", -14.0)),
-        true_peak_db=float(config.audio_mix.get("true_peak_db", -1.0)),
+        attack_ms=int(audio.get("attack_ms", 50)),
+        release_ms=int(audio.get("release_ms", 500)),
+        target_lufs=float(audio.get("target_lufs", -14.0)),
+        true_peak_db=float(audio.get("true_peak_db", -1.0)),
+        game_compressor_threshold=float(audio.get("v2_game_compressor_threshold", 0.18)),
+        game_compressor_ratio=float(audio.get("v2_game_compressor_ratio", 3.0)),
+        game_compressor_attack_ms=int(audio.get("v2_game_compressor_attack_ms", 8)),
+        game_compressor_release_ms=int(audio.get("v2_game_compressor_release_ms", 140)),
+        game_limiter_limit=float(audio.get("v2_game_limiter_limit", 0.60)),
+        music_duck_threshold=float(audio.get("v2_music_duck_threshold", 0.12)),
+        music_duck_ratio=float(audio.get("v2_music_duck_ratio", 1.6)),
+        music_duck_mix=float(audio.get("v2_music_duck_mix", 0.2)),
     )
     return prefix + mix
 
@@ -277,7 +288,11 @@ def compile_v2_final_argv(
     argv += ["-ss", f"{edit.music_in:.3f}", "-t", f"{edit.duration:.3f}", "-i", str(edit.music_source)]
     argv += [
         "-filter_complex", graph, "-map", "[v]", "-map", "[aout]",
-        "-fps_mode", "passthrough", "-c:v", encoder, *encoder_args,
+        # The concat filter can expose duplicate DTS when passthrough is used
+        # with mixed source time bases.  The V1 preview intentionally has a
+        # stable ~60 fps deliverable, so finalize the concatenated stream as
+        # CFR and keep timestamps monotonic.
+        "-fps_mode", "cfr", "-r", f"{float(config.target_fps):g}", "-c:v", encoder, *encoder_args,
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
         "-b:a", str(config.audio_mix.get("bitrate", "320k")), "-t", f"{edit.duration:.3f}",
         "-movflags", "+faststart", str(destination),

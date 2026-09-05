@@ -118,7 +118,7 @@ def generate_candidates(
             continue
         if record.duration <= config.short_clip_threshold:
             windows = [(0.0, record.duration, _feature_runs({}, analysis, 0.0, record.duration))]
-            human_prior = 0.42
+            human_prior = config.v2_short_clip_prior
         else:
             core_windows = [
                 window

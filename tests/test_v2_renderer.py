@@ -65,6 +65,8 @@ def test_final_argv_has_hard_cut_video_and_single_music_input(fake_toolchain, ba
     assert "sidechaincompress" in graph and "acrossfade" in graph
     assert argv.count(str(music)) == 1
     assert "-ar" in argv and argv[argv.index("-ar") + 1] == "48000"
+    assert argv[argv.index("-fps_mode") + 1] == "cfr"
+    assert argv[argv.index("-r") + 1] == "60"
 
 
 def test_audio_overlap_is_conservative_and_impact_edges_are_direct(base_config, tmp_path):
@@ -91,6 +93,18 @@ def test_audio_filter_has_smooth_ducking_and_never_mutes_gameplay():
     assert "duration=longest" in graph
     assert "amix=inputs=2" in graph
     assert "volume=0dB" not in graph
+
+
+def test_audio_filter_compresses_game_peaks_and_keeps_music_at_a_low_floor():
+    graph = build_v2_audio_filter("game", "music", -6.0, -14.0, duration=45.0)
+
+    assert "acompressor=" in graph
+    assert "alimiter=" in graph
+    assert "volume=-14.000dB[music_bus]" in graph
+    assert "ratio=1.6" in graph
+    assert "mix=0.2" in graph
+    assert "[game_bus]asplit=2[game_sidechain][game_mix]" in graph
+    assert "amix=inputs=2:duration=longest" in graph
 
 
 def test_renderer_rejects_raw_destination_before_running_ffmpeg(fake_toolchain, base_config, tmp_path):
