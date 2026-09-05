@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -29,14 +29,18 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QSlider,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
+    QTextEdit,
     QWidget,
 )
 
 from .workflow import DEFAULT_AUDIO_OUTPUT, MontageWorkflow, WorkflowRule
+from .generation import GenerationRequest, GenerationResult
+from .generation_worker import GenerationWorker
 
 APP_ORGANIZATION = "MontageLab"
 APP_NAME = "GameMontageGenerator"
@@ -294,6 +298,9 @@ class MontageLab(QMainWindow):
         self.settings = QSettings(APP_ORGANIZATION, APP_NAME)
         self.data_dir = Path(self.settings.fileName()).parent
         self.profiles_dir = self.data_dir / "profiles"
+        self._generation_thread: QThread | None = None
+        self._generation_worker: GenerationWorker | None = None
+        self._deferred_close = False
         self._build_ui(); self._restore_preferences(); self.refresh_profiles()
 
     def _build_ui(self) -> None:
@@ -324,9 +331,31 @@ class MontageLab(QMainWindow):
         self.steps.addWidget(page)
 
     def _build_ready_page(self) -> None:
-        page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("步骤 4：准备生成", objectName="heading")); self.summary = QLabel(); self.summary.setWordWrap(True); layout.addWidget(self.summary); generate = QPushButton("开始生成 AI 初剪"); generate.clicked.connect(lambda: QMessageBox.information(self, "本地 Worker", "Worker 接口将在下一实现切片接入；当前项目配置已完成。")); layout.addWidget(generate); layout.addStretch(); self.steps.addWidget(page)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("Step 4: Prepare generation", objectName="heading"))
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        self.generate_button = QPushButton("开始生成 AI 初剪")
+        self.generate_button.clicked.connect(self.start_generation)
+        layout.addWidget(self.generate_button)
+        self.generation_progress = QProgressBar()
+        self.generation_progress.setRange(0, 100)
+        layout.addWidget(self.generation_progress)
+        self.generation_status = QLabel()
+        self.generation_status.setWordWrap(True)
+        layout.addWidget(self.generation_status)
+        self.generation_log = QTextEdit()
+        self.generation_log.setReadOnly(True)
+        self.generation_log.setMaximumHeight(150)
+        layout.addWidget(self.generation_log)
+        layout.addStretch()
+        self.steps.addWidget(page)
 
     def refresh_profiles(self) -> None:
+        for button in self.game_buttons.buttons():
+            self.game_buttons.removeButton(button)
         while self.profile_list.count():
             item = self.profile_list.takeAt(0); widget = item.widget()
             if widget: widget.deleteLater()
@@ -336,9 +365,89 @@ class MontageLab(QMainWindow):
                 data = json.loads(path.read_text(encoding="utf-8")); game = data.get("game", {}).get("display_name", path.stem); rules = data.get("detectors", {}).get("rules", [])
                 labels = ", ".join(r.get("label", "Unnamed") for r in rules)
                 button = QPushButton(f"{game} | {len(rules)} rules | {labels}")
+                button.setProperty("workflow_path", str(path))
                 button.setCheckable(True); self.game_buttons.addButton(button); self.profile_list.addWidget(button)
             except (OSError, json.JSONDecodeError):
                 continue
+
+        buttons = self.game_buttons.buttons()
+        if buttons:
+            buttons[0].setProperty("workflow_path", str(Path(__file__).resolve().parents[1] / "examples" / "battlefield6_workflow.json"))
+
+    def _selected_workflow(self) -> MontageWorkflow:
+        button = self.game_buttons.checkedButton()
+        path_value = button.property("workflow_path") if button else None
+        if path_value:
+            return MontageWorkflow.import_json(Path(str(path_value)))
+        return MontageWorkflow.import_json(Path(__file__).resolve().parents[1] / "examples" / "battlefield6_workflow.json")
+
+    def start_generation(self) -> None:
+        if self._generation_thread is not None and self._generation_thread.isRunning():
+            return
+        source = Path(self.video_folder.text().strip())
+        if not source.is_dir():
+            self.generation_status.setText("Select an existing source directory before starting.")
+            return
+        try:
+            workflow = self._selected_workflow()
+            from dataclasses import replace
+            from .workflow import EditRules
+            values = {"event_pre_seconds": float(self.rule_boxes["pre"].text()), "event_post_seconds": float(self.rule_boxes["post"].text()), "merge_gap_seconds": float(self.rule_boxes["merge"].text()), "long_gap_bridge_seconds": float(self.rule_boxes["bridge"].text()), "fade_to_black_seconds": float(self.rule_boxes["fade"].text())}
+            workflow = replace(workflow, edit_rules=EditRules(**values))
+            request = GenerationRequest(workflow, source, Path("D:/91/集锦/work"), Path("D:/91/集锦/output"), Path(self.music_file.text()) if self.music_file.text() else None, workflow_path=Path(str(self.game_buttons.checkedButton().property("workflow_path"))) if self.game_buttons.checkedButton() and self.game_buttons.checkedButton().property("workflow_path") else None)
+        except Exception as exc:
+            self.generation_status.setText(f"Generation setup failed: {exc}")
+            return
+        self.generation_log.clear()
+        self.generation_progress.setValue(0)
+        self.generation_status.setText("Scanning in background…")
+        self.generate_button.setEnabled(False)
+        self._generation_thread = QThread(self)
+        self._generation_worker = GenerationWorker(request)
+        self._generation_worker.moveToThread(self._generation_thread)
+        self._generation_thread.started.connect(self._generation_worker.run)
+        self._generation_worker.progress.connect(self._on_generation_progress)
+        self._generation_worker.log.connect(self._on_generation_log)
+        self._generation_worker.succeeded.connect(self._on_generation_success)
+        self._generation_worker.failed.connect(self._on_generation_failure)
+        self._generation_worker.finished.connect(self._generation_thread.quit)
+        self._generation_worker.finished.connect(self._generation_worker.deleteLater)
+        self._generation_thread.finished.connect(self._generation_thread.deleteLater)
+        self._generation_thread.finished.connect(self._generation_finished)
+        self._generation_thread.start()
+
+    def _on_generation_progress(self, percent: int, message: str) -> None:
+        self.generation_progress.setValue(percent)
+        self.generation_status.setText(message)
+
+    def _on_generation_log(self, message: str) -> None:
+        self.generation_log.append(message)
+
+    def _on_generation_success(self, result: GenerationResult) -> None:
+        self.generation_progress.setValue(100)
+        self.generation_status.setText(f"{result.status}: {len(result.events)} events · {result.run_dir}")
+        for diagnostic in result.diagnostics:
+            self.generation_log.append(diagnostic)
+
+    def _on_generation_failure(self, message: str) -> None:
+        self.generation_status.setText(f"Generation failed: {message}")
+        self.generation_log.append(message)
+
+    def _generation_finished(self) -> None:
+        self.generate_button.setEnabled(True)
+        self._generation_worker = None
+        self._generation_thread = None
+        if self._deferred_close:
+            self._deferred_close = False
+            self.close()
+
+    def closeEvent(self, event) -> None:
+        if self._generation_thread is not None and self._generation_thread.isRunning():
+            self._deferred_close = True
+            self.generation_status.setText("Finishing current scan before closing…")
+            event.ignore()
+            return
+        event.accept()
 
     def open_custom_profile(self) -> None:
         wizard = ProfileWizard(self.profiles_dir, self)
@@ -350,10 +459,10 @@ class MontageLab(QMainWindow):
         if selected: QMessageBox.information(self, "已导入", f"已选择配置：\n{selected}")
 
     def select_video_folder(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "选择视频素材文件夹")
+        selected = QFileDialog.getExistingDirectory(self, "Select source folder")
         if selected:
-            count = sum(1 for path in Path(selected).rglob("*") if path.suffix.lower() in VIDEO_SUFFIXES)
-            self.video_folder.setText(f"{selected}  ({count} 个视频)"); self.settings.setValue("video_folder", selected)
+            self.video_folder.setText(str(Path(selected).resolve(strict=False)))
+            self.settings.setValue("video_folder", selected)
 
     def select_music(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "选择背景音乐", "", "Audio/Video (*.mp3 *.wav *.m4a *.aac *.mp4 *.mkv)")

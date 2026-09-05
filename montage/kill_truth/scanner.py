@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 import cv2
 import numpy as np
@@ -238,6 +239,7 @@ def scan_source(
     raw_dir: Path | None = None,
     detector: SkullDetector | None = None,
     use_cache: bool = True,
+    progress: Callable[[int, str], None] | None = None,
 ) -> V6ScanResult:
     settings = scan_config or V6ScanConfig()
     assert_source_read_only(record.file_path, raw_dir or record.file_path.parent)
@@ -278,6 +280,15 @@ def scan_source(
     frames_scanned = 0
     dense_frames_scanned = 0
     errors: list[str] = []
+    last_progress = 0.0
+
+    def report(percent: int, message: str, *, force: bool = False) -> None:
+        nonlocal last_progress
+        now = time.monotonic()
+        if progress and (force or now - last_progress >= 0.2):
+            progress(max(0, min(100, int(percent))), message)
+            last_progress = now
+
     try:
         for timestamp, frame in iter_cropped_frames(
             toolchain,
@@ -294,6 +305,8 @@ def scan_source(
                 source_id=source_id,
             )
             frames_scanned += 1
+            expected_frames = max(1, int(record.duration * settings.coarse_fps))
+            report(min(65, int(frames_scanned * 55 / expected_frames)), f"V6 coarse frames scanned: {frames_scanned}")
             if settings.keep_all_states or state.panel_present:
                 coarse_states.append(state)
             machine.consume(state)
@@ -315,6 +328,8 @@ def scan_source(
                 duration=window_duration,
             ):
                 dense_frames_scanned += 1
+                expected_dense = max(1, int(window_duration * settings.dense_fps))
+                report(min(95, 65 + int(dense_frames_scanned * 30 / expected_dense)), f"V6 dense frames scanned: {dense_frames_scanned}")
                 states.append(
                     detector.detect_cropped(
                         frame,
@@ -351,6 +366,7 @@ def scan_source(
     )
     if output_cache:
         atomic_write_json(output_cache, {"cache_key": expected_key, "data": result.to_dict()})
+    report(100, f"V6 scan complete: {len(events)} events", force=True)
     return result
 
 
