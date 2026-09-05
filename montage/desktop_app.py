@@ -7,9 +7,10 @@ user's application-data directory and never writes into selected RAW folders.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
@@ -35,9 +36,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .workflow import DEFAULT_AUDIO_OUTPUT, MontageWorkflow
+
 APP_ORGANIZATION = "MontageLab"
 APP_NAME = "GameMontageGenerator"
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm"}
+DEFAULT_EDIT_RULES = {
+    "event_pre_seconds": 1.5,
+    "event_post_seconds": 0.5,
+    "merge_gap_seconds": 2.0,
+    "long_gap_bridge_seconds": 2.0,
+    "fade_to_black_seconds": 5.0,
+}
 
 
 @dataclass
@@ -48,21 +58,75 @@ class DetectionRule:
     negative_sample: Path | None
     roi: tuple[float, float, float, float]
     threshold: float
+    rule_id: str | None = None
+    metadata: dict = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
-        return {"id": re.sub(r"[^a-z0-9]+", "-", self.name.lower()).strip("-") or "rule", "label": self.name, "type": "template_match", "search_roi": list(self.roi), "threshold": self.threshold, "templates": [str(self.marker_sample)], "positive_samples": [str(self.positive_sample)], "negative_samples": [str(self.negative_sample)] if self.negative_sample else []}
+    @property
+    def id(self) -> str | None:
+        return self.rule_id
+
+    def to_dict(self, *, rule_id: str | None = None) -> dict:
+        if not all(math.isfinite(float(value)) for value in self.roi + (self.threshold,)):
+            raise ValueError("rule ROI and threshold must be finite")
+        if not 0 <= self.threshold <= 1:
+            raise ValueError("rule threshold must be between 0 and 1")
+        return {"id": rule_id or self.rule_id or "rule", "label": self.name, "type": "template_match", "search_roi": list(self.roi), "threshold": self.threshold, "templates": [str(self.marker_sample)], "positive_samples": [str(self.positive_sample)], "negative_samples": [str(self.negative_sample)] if self.negative_sample else [], "metadata": dict(self.metadata)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DetectionRule":
+        roi = data.get("search_roi")
+        if not isinstance(roi, (list, tuple)) or len(roi) != 4:
+            raise ValueError("desktop rule search_roi must contain four values")
+        templates = data.get("templates", [])
+        if not isinstance(templates, list) or not templates:
+            raise ValueError("desktop rule requires a template sample")
+        positive = data.get("positive_samples", [])
+        if not isinstance(positive, list) or not positive:
+            raise ValueError("desktop rule requires a positive sample")
+        negative = data.get("negative_samples", [])
+        marker = templates[0].get("file", "") if isinstance(templates[0], dict) else templates[0]
+        if not marker:
+            raise ValueError("desktop rule template sample requires a file")
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("desktop rule metadata must be an object")
+        return cls(str(data.get("label", "高光事件")), Path(marker), Path(positive[0]), Path(negative[0]) if negative else None, tuple(float(value) for value in roi), float(data.get("threshold", 0.65)), str(data.get("id", "rule")), dict(metadata))
 
 @dataclass
 class CustomProfile:
     name: str
     rules: list[DetectionRule]
+    edit_rules: dict = field(default_factory=dict)
+    audio_output: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=lambda: {"created_by": "Montage Lab desktop application", "editable": True})
 
     @property
     def game_id(self) -> str:
         return re.sub(r"[^a-z0-9]+", "-", self.name.lower()).strip("-") or "custom-game"
 
     def workflow(self) -> dict:
-        return {"schema": "game-montage-workflow-v1", "game": {"id": self.game_id, "display_name": self.name}, "detectors": {"rules": [rule.to_dict() for rule in self.rules]}, "metadata": {"created_by": "Montage Lab desktop application", "editable": True}}
+        seen: set[str] = set()
+        serialized_rules = []
+        for rule in self.rules:
+            base_id = rule.rule_id or re.sub(r"[^a-z0-9]+", "-", rule.name.lower()).strip("-") or "rule"
+            rule_id = base_id
+            suffix = 2
+            while rule_id in seen:
+                rule_id = f"{base_id}-{suffix}"
+                suffix += 1
+            seen.add(rule_id)
+            serialized_rules.append(rule.to_dict(rule_id=rule_id))
+        edit_rules = dict(DEFAULT_EDIT_RULES); edit_rules.update(self.edit_rules)
+        audio_output = dict(DEFAULT_AUDIO_OUTPUT); audio_output.update(self.audio_output)
+        result = {"schema": "game-montage-workflow-v1", "game": {"id": self.game_id, "display_name": self.name}, "detectors": {"rules": serialized_rules}, "edit_rules": edit_rules, "audio_output": audio_output, "metadata": dict(self.metadata)}
+        return result
+
+    @classmethod
+    def from_workflow_dict(cls, data: dict) -> "CustomProfile":
+        workflow = MontageWorkflow.from_dict(data)
+        desktop = workflow.to_desktop_dict()
+        rules = [DetectionRule.from_dict(item) for item in desktop["detectors"]["rules"]]
+        return cls(workflow.display_name, rules, desktop.get("edit_rules", {}), desktop.get("audio_output", {}), dict(desktop.get("metadata", {})))
 
 
 class ProfileWizard(QDialog):
@@ -194,6 +258,10 @@ class ProfileWizard(QDialog):
     def save_profile(self) -> None:
         profile = self._profile(); self.profiles_dir.mkdir(parents=True, exist_ok=True)
         output = self.profiles_dir / f"{profile.game_id}-workflow.json"
+        if output.exists():
+            existing = MontageWorkflow.import_json(output)
+            previous = CustomProfile.from_workflow_dict(existing.to_desktop_dict())
+            profile = CustomProfile(profile.name, previous.rules + profile.rules, previous.edit_rules, previous.audio_output, previous.metadata)
         output.write_text(json.dumps(profile.workflow(), ensure_ascii=False, indent=2), encoding="utf-8")
         QMessageBox.information(self, "已保存", f"配置已保存到：\n{output}")
         self.accept()
