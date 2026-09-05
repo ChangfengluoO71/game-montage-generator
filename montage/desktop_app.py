@@ -173,7 +173,12 @@ class ProfileWizard(QDialog):
         if page < 3 and not self._validate(page): return
         if page == 2:
             profile = self._profile()
-            self.review.setText(f"游戏：{profile.name}\n事件：{profile.event_label}\n检测方式：{self.detector.currentText()}\nROI：{profile.roi}\n阈值：{profile.threshold:.2f}\n标志样本：{profile.marker_sample.name}\n完整正例：{profile.positive_sample.name}")
+            rule = profile.rules[0]
+            self.review.setText(
+                f"Game: {profile.name}\nRule: {rule.name}\nROI: {rule.roi}\n"
+                f"Threshold: {rule.threshold:.2f}\nMarker: {rule.marker_sample.name}\n"
+                f"Positive: {rule.positive_sample.name}"
+            )
         if page == 3:
             self.save_profile(); return
         self.stack.setCurrentIndex(page + 1); self._refresh_buttons()
