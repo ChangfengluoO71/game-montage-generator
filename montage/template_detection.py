@@ -88,9 +88,16 @@ def scan_template_frames(
     label: str,
     reference_height: int | None = None,
     duration: float | None = None,
+    release_seconds: float = 0.10,
     progress: Callable[[int, str], None] | None = None,
 ) -> list[TemplateEvent]:
-    """Scan decoded frames and emit only threshold rising edges."""
+    """Scan decoded frames and emit debounced threshold rising edges.
+
+    A single dropped frame must not re-arm a HUD marker that is still visible.
+    ``release_seconds`` is measured from the most recent positive match, so a
+    new event is emitted only after the marker has been absent for a bounded
+    interval.
+    """
     templates = [load_image_unicode(Path(path)) for path in template_paths]
     if not templates:
         raise ValueError("template rule has no templates")
@@ -98,6 +105,7 @@ def scan_template_frames(
         raise ValueError("template threshold must be between 0 and 1")
     reference_height = int(reference_height or 0)
     active = False
+    below_since: float | None = None
     events: list[TemplateEvent] = []
     last_report = 0.0
     seen_frames = 0
@@ -115,7 +123,8 @@ def scan_template_frames(
             raise ValueError("template is larger than the configured ROI")
         score, template_index, scale = _best_match(region, templates, scales)
         matched = score >= float(threshold)
-        if matched and not active:
+        release_window = max(0.0, float(release_seconds))
+        if matched and (not active or (below_since is not None and timestamp - below_since + 1e-6 >= release_window)):
             event_id = f"{source_id}-{rule_id}-{len(events) + 1:04d}"
             events.append(TemplateEvent(timestamp, score, source_id, rule_id, label, {
                 "detector": "template_match",
@@ -124,7 +133,13 @@ def scan_template_frames(
                 "threshold": float(threshold),
                 "positive_samples_are_calibration_references": True,
             }))
-        active = matched
+        if matched:
+            active = True
+            below_since = None
+        elif below_since is None:
+            below_since = timestamp
+        elif timestamp - below_since + 1e-6 >= release_window:
+            active = False
         seen_frames += 1
         now = time.monotonic()
         if progress and (now - last_report >= 0.2 or seen_frames == 1):

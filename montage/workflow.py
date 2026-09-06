@@ -357,8 +357,12 @@ class TimelineClip:
     review_status: str = "pending"
 
     def validate(self) -> None:
-        if not self.clip_id or not self.source_id:
+        if not isinstance(self.clip_id, str) or not self.clip_id.strip() or not isinstance(self.source_id, str) or not self.source_id.strip():
             raise ValueError("timeline clip ids are required")
+        for name, value in (("source_in", self.source_in), ("source_out", self.source_out), ("timeline_in", self.timeline_in), ("timeline_out", self.timeline_out)):
+            _finite_number(value, f"timeline clip {name}")
+        if not isinstance(self.event_ids, list) or any(not isinstance(event_id, str) or not event_id.strip() for event_id in self.event_ids):
+            raise ValueError("timeline clip event_ids must be an array of strings")
         if self.source_in < 0 or self.source_out <= self.source_in:
             raise ValueError("source clip range is invalid")
         if self.timeline_in < 0 or self.timeline_out <= self.timeline_in:
@@ -382,9 +386,61 @@ class EditableProject:
     music_source: str | None = None
     render_settings: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
-        if not self.project_id:
+    def validate(self) -> None:
+        if not isinstance(self.project_id, str) or not self.project_id.strip():
             raise ValueError("project_id is required")
+        if not isinstance(self.workflow, MontageWorkflow):
+            raise ValueError("project workflow is required")
+        self.workflow.validate()
+        if not isinstance(self.clips, list):
+            raise ValueError("clips must be an array")
+        if not isinstance(self.source_ledger, list):
+            raise ValueError("source_ledger must be an array")
+        if self.music_source is not None and not isinstance(self.music_source, str):
+            raise ValueError("music_source must be a string or null")
+        if not isinstance(self.render_settings, dict):
+            raise ValueError("render_settings must be an object")
+        durations: dict[str, float] = {}
+        source_ids: set[str] = set()
+        for source in self.source_ledger:
+            if not isinstance(source, dict):
+                raise ValueError("source_ledger entries must be objects")
+            source_id = source.get("source_id")
+            if not isinstance(source_id, str) or not source_id.strip():
+                raise ValueError("source_ledger entries require source_id")
+            if source_id in durations:
+                raise ValueError(f"duplicate source id: {source_id}")
+            if source_id in source_ids:
+                raise ValueError(f"duplicate source id: {source_id}")
+            source_ids.add(source_id)
+            if "duration" in source:
+                duration = _finite_number(source["duration"], f"source {source_id} duration")
+                if duration <= 0:
+                    raise ValueError(f"source {source_id} duration must be positive")
+                durations[source_id] = duration
+        seen_clip_ids: set[str] = set()
+        previous_timeline_out: float | None = None
+        for clip in self.clips:
+            if not isinstance(clip, TimelineClip):
+                raise ValueError("clips must contain TimelineClip objects")
+            clip.validate()
+            if clip.clip_id in seen_clip_ids:
+                raise ValueError(f"duplicate clip id: {clip.clip_id}")
+            seen_clip_ids.add(clip.clip_id)
+            if source_ids:
+                if clip.source_id not in source_ids:
+                    raise ValueError(f"unknown source: {clip.source_id}")
+            if clip.source_id in durations:
+                if clip.source_out > durations[clip.source_id]:
+                    raise ValueError(f"clip source range exceeds source bounds: {clip.source_id}")
+            if previous_timeline_out is None and not math.isclose(clip.timeline_in, 0.0, rel_tol=0.0, abs_tol=1e-9):
+                raise ValueError("timeline clips must start at zero")
+            if previous_timeline_out is not None and not math.isclose(clip.timeline_in, previous_timeline_out, rel_tol=0.0, abs_tol=1e-9):
+                raise ValueError("timeline clips must be contiguous")
+            previous_timeline_out = clip.timeline_out
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
         return {"schema": "game-montage-project-v1", "project_id": self.project_id,
                 "workflow": self.workflow.to_dict(), "clips": [clip.to_dict() for clip in self.clips],
                 "source_ledger": self.source_ledger, "music_source": self.music_source,
@@ -397,12 +453,20 @@ class EditableProject:
     @classmethod
     def import_json(cls, path: Path) -> "EditableProject":
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("project JSON must be an object")
         if data.get("schema") != "game-montage-project-v1":
             raise ValueError(f"unsupported project schema: {data.get('schema')}")
+        if not isinstance(data.get("project_id"), str) or not data["project_id"].strip():
+            raise ValueError("project_id is required")
         workflow = MontageWorkflow.from_dict(data["workflow"])
-        clips = [TimelineClip(**clip) for clip in data.get("clips", [])]
-        project = cls(str(data["project_id"]), workflow, clips, list(data.get("source_ledger", [])),
-                      data.get("music_source"), dict(data.get("render_settings", {})))
-        for clip in project.clips:
-            clip.validate()
+        raw_clips = data.get("clips", [])
+        raw_ledger = data.get("source_ledger", [])
+        raw_settings = data.get("render_settings", {})
+        if not isinstance(raw_clips, list) or not isinstance(raw_ledger, list) or not isinstance(raw_settings, dict):
+            raise ValueError("clips, source_ledger, and render_settings must be valid containers")
+        clips = [TimelineClip(**clip) for clip in raw_clips]
+        project = cls(data["project_id"], workflow, clips, raw_ledger,
+                      data.get("music_source"), raw_settings)
+        project.validate()
         return project

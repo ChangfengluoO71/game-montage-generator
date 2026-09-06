@@ -144,3 +144,8 @@
 | 内置示例 | `examples/battlefield6_workflow.json` |
 | 前端原型（勿优先维护） | `frontend/` |
 | 架构文档 | `docs/reusable-game-montage-workflow.md`、`docs/frontend-game-montage-generator-plan.md` |
+## 10. 实施完成记录（2026-09-06）
+
+本分支已完成 M1-M5 首版闭环。检测后端采用内置 Battlefield 6 的 V6 `skull_row` profile 与自定义游戏的 normalized ROI `template_match`；UI 继续 PySide6，渲染先走最简 v1 FFmpeg 管线，RAW 只读。
+
+真实试产证据位于 `D:\91\集锦\work\desktop-production-evidence\trial-20260906`：4 个 V6 事件、2 个 timeline clips，生成 H.264/AAC MP4；`ffprobe` 和完整解码通过，RAW 前后清单一致。PySide6 按钮实跑证据包含进度、结果状态和截图。完整验证为 `268 passed, 2 warnings`，详见 `docs/IMPLEMENTATION_STATUS.md`。

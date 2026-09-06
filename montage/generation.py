@@ -15,6 +15,8 @@ from .kill_truth.profile import HudProfile, load_profile
 from .kill_truth.scanner import V6ScanConfig, scan_source, source_id_for_path
 from .media_index import probe_media
 from .models import MediaRecord
+from .project_builder import build_project
+from .project_renderer import render_project
 from .template_detection import TemplateEvent, scan_template_source
 from .toolchain import discover_toolchain
 from .workflow import DetectorConfig, MontageWorkflow, WorkflowRule
@@ -35,6 +37,7 @@ class GenerationRequest:
     config_path: Path = _REPO_CONFIG
     use_cache: bool = True
     workflow_path: Path | None = None
+    render: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_dir", Path(self.source_dir).resolve(strict=False))
@@ -241,6 +244,7 @@ def run_generation(
     events_path = run_dir / "events.json"
     ledger_path = run_dir / "source_ledger.json"
     diagnostics_path = run_dir / "diagnostics.json"
+    result_path = run_dir / "result.json"
     records: list[MediaRecord] = []
     ledger: list[dict[str, Any]] = []
     events: list[GenerationEvent] = []
@@ -277,6 +281,10 @@ def run_generation(
                 "status": "PENDING",
             })
         atomic_write_json(ledger_path, {"schema": "montage-source-ledger-v1", "sources": ledger})
+        if selected_paths and not records:
+            raise GenerationFailure(
+                "No selected video could be decoded; inspect diagnostics.json for skipped sources"
+            )
         if not selected_paths:
             diagnostics.append("No video sources were selected")
         rules = workflow.rules or [WorkflowRule("legacy-detector", workflow.detector.event_label, workflow.detector)]
@@ -340,12 +348,57 @@ def run_generation(
         events.sort(key=lambda event: (event.source_id, event.timestamp, event.rule_id))
         if not events:
             diagnostics.append("No detection events found; no footage was fabricated")
-        status = "NO_DETECTIONS" if not events else "OK"
-        result = GenerationResult(run_dir, events_path, ledger_path, events, records, status, diagnostics)
+        if not events:
+            status = "NO_DETECTIONS_WITH_WARNINGS" if diagnostics else "NO_DETECTIONS"
+            result = GenerationResult(run_dir, events_path, ledger_path, events, records, status, diagnostics)
+            atomic_write_json(events_path, {"schema": "montage-events-v1", "status": status, "events": [], "diagnostics": diagnostics})
+            atomic_write_json(ledger_path, {"schema": "montage-source-ledger-v1", "sources": ledger})
+            atomic_write_json(diagnostics_path, {"status": status, "diagnostics": diagnostics})
+            atomic_write_json(result_path, result.to_dict())
+            _emit(progress, 100, "扫描完成：未检测到事件")
+            return result
+
+        status = "OK_WITH_WARNINGS" if diagnostics else "OK"
+        usable_ledger = [item for item in ledger if item.get("status") == "OK"]
+        project = build_project(
+            workflow,
+            [event.to_dict() for event in events],
+            usable_ledger,
+            project_id=f"{workflow.game_id}-{run_dir.name}",
+            music_source=str(request.music_source) if request.music_source else None,
+            render_settings={
+                "width": config.output_width,
+                "height": config.output_height,
+                "fps": config.target_fps,
+                "fade_to_black_seconds": workflow.edit_rules.fade_to_black_seconds,
+            },
+        )
+        project_path = run_dir / "project.json"
+        workflow_path = run_dir / "workflow.json"
+        render_settings_path = run_dir / "render-settings.json"
+        project.export_json(project_path)
+        workflow.export_json(workflow_path)
+        atomic_write_json(render_settings_path, project.render_settings)
+        result = GenerationResult(run_dir, events_path, ledger_path, events, records, status, diagnostics, project_path=project_path)
+        _emit(progress, 68, f"已生成可编辑项目：{project_path.name}")
+        if request.render:
+            output_path = request.output_dir / f"{project.project_id}.mp4"
+            result.status = "RENDERING_WITH_WARNINGS" if diagnostics else "RENDERING"
+            toolchain = toolchain or discover_toolchain(config)
+            output = render_project(
+                project,
+                config,
+                toolchain,
+                output_path,
+                progress=lambda value, message: _emit(progress, 70 + int(value * 0.3), message),
+            )
+            result.output_path = output
+            result.status = "OK_WITH_WARNINGS" if diagnostics else "OK"
+        atomic_write_json(result_path, result.to_dict())
         atomic_write_json(events_path, {"schema": "montage-events-v1", "status": status, "events": [event.to_dict() for event in events], "diagnostics": diagnostics})
         atomic_write_json(ledger_path, {"schema": "montage-source-ledger-v1", "sources": ledger})
         atomic_write_json(diagnostics_path, {"status": status, "diagnostics": diagnostics})
-        _emit(progress, 100, "扫描完成" if events else "扫描完成：未检测到事件")
+        _emit(progress, 100, "生成完成" if request.render else "扫描完成")
         return result
     except GenerationFailure as exc:
         diagnostics.append(str(exc))
@@ -354,6 +407,8 @@ def run_generation(
         atomic_write_json(events_path, {"schema": "montage-events-v1", "status": "FAILED", "events": [event.to_dict() for event in events], "diagnostics": diagnostics})
         atomic_write_json(ledger_path, {"schema": "montage-source-ledger-v1", "sources": ledger})
         atomic_write_json(diagnostics_path, {"status": "FAILED", "diagnostics": diagnostics})
+        if result is not None:
+            atomic_write_json(result_path, result.to_dict())
         raise GenerationFailure(str(exc), result) from exc
     except Exception as exc:
         diagnostics.append(str(exc))
@@ -362,4 +417,6 @@ def run_generation(
         atomic_write_json(events_path, {"schema": "montage-events-v1", "status": "FAILED", "events": [event.to_dict() for event in events], "diagnostics": diagnostics})
         atomic_write_json(ledger_path, {"schema": "montage-source-ledger-v1", "sources": ledger})
         atomic_write_json(diagnostics_path, {"status": "FAILED", "diagnostics": diagnostics})
+        if result is not None:
+            atomic_write_json(result_path, result.to_dict())
         raise GenerationFailure(f"generation failed: {exc}", result) from exc

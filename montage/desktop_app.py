@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QThread
+from PySide6.QtCore import QSettings, QStandardPaths, Qt, QThread, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -296,17 +298,20 @@ class MontageLab(QMainWindow):
     def __init__(self) -> None:
         super().__init__(); self.setWindowTitle("Montage Lab — Game Montage Generator"); self.resize(980, 660)
         self.settings = QSettings(APP_ORGANIZATION, APP_NAME)
-        self.data_dir = Path(self.settings.fileName()).parent
+        self.data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.profiles_dir = self.data_dir / "profiles"
+        self._migrate_legacy_profiles()
         self._generation_thread: QThread | None = None
         self._generation_worker: GenerationWorker | None = None
+        self.last_generation_result: GenerationResult | None = None
         self._deferred_close = False
         self._build_ui(); self._restore_preferences(); self.refresh_profiles()
 
     def _build_ui(self) -> None:
         root = QWidget(); self.setCentralWidget(root); layout = QVBoxLayout(root)
-        header = QHBoxLayout(); header.addWidget(QLabel("Montage Lab", objectName="title")); header.addStretch(); settings = QPushButton("全局设置")
-        settings.clicked.connect(self.open_settings); header.addWidget(settings); layout.addLayout(header)
+        header = QHBoxLayout(); header.addWidget(QLabel("Montage Lab", objectName="title")); header.addStretch(); self.settings_button = QPushButton("全局设置")
+        self.settings_button.clicked.connect(self.open_settings); header.addWidget(self.settings_button); layout.addLayout(header)
         self.steps = QStackedWidget(); layout.addWidget(self.steps, 1)
         self._build_game_page(); self._build_media_page(); self._build_rules_page(); self._build_ready_page()
         footer = QHBoxLayout(); self.back = QPushButton("← 返回"); self.next = QPushButton("下一步 →"); self.back.clicked.connect(self.previous); self.next.clicked.connect(self.advance); footer.addWidget(self.back); footer.addStretch(); footer.addWidget(self.next); layout.addLayout(footer); self._refresh_navigation()
@@ -321,7 +326,10 @@ class MontageLab(QMainWindow):
 
     def _build_media_page(self) -> None:
         page = QWidget(); form = QFormLayout(page); form.addRow(QLabel("步骤 2：素材与音乐", objectName="heading"))
-        self.video_folder = QLineEdit(); self.video_folder.setReadOnly(True); choose_video = QPushButton("选择扫描文件夹"); choose_video.clicked.connect(self.select_video_folder); row = QHBoxLayout(); row.addWidget(self.video_folder); row.addWidget(choose_video); form.addRow("视频素材文件夹", row)
+        self.video_folder = QLineEdit(); self.video_folder.setReadOnly(True); self.video_count = QLabel("未选择素材")
+        choose_video = QPushButton("选择扫描文件夹"); choose_video.clicked.connect(self.select_video_folder)
+        choose_file = QPushButton("选择单个视频试产"); choose_file.clicked.connect(self.select_video_file)
+        row = QHBoxLayout(); row.addWidget(self.video_folder); row.addWidget(choose_video); row.addWidget(choose_file); form.addRow("视频素材文件夹", row); form.addRow("扫描计数", self.video_count)
         self.music_file = QLineEdit(); self.music_file.setReadOnly(True); choose_music = QPushButton("选择背景音乐"); choose_music.clicked.connect(self.select_music); row2 = QHBoxLayout(); row2.addWidget(self.music_file); row2.addWidget(choose_music); form.addRow("背景音乐（独立）", row2); form.addRow(QLabel("视频文件夹只会扫描，不会改写 RAW；MP4 音乐会在后续 worker 中提取第一条音轨。")); self.steps.addWidget(page)
 
     def _build_rules_page(self) -> None:
@@ -333,7 +341,7 @@ class MontageLab(QMainWindow):
     def _build_ready_page(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Step 4: Prepare generation", objectName="heading"))
+        layout.addWidget(QLabel("步骤 4：准备生成", objectName="heading"))
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
@@ -350,6 +358,13 @@ class MontageLab(QMainWindow):
         self.generation_log.setReadOnly(True)
         self.generation_log.setMaximumHeight(150)
         layout.addWidget(self.generation_log)
+        self.generation_result = QLabel("尚未生成结果")
+        self.generation_result.setWordWrap(True)
+        layout.addWidget(self.generation_result)
+        self.open_output_button = QPushButton("打开输出目录")
+        self.open_output_button.setEnabled(False)
+        self.open_output_button.clicked.connect(self.open_output_directory)
+        layout.addWidget(self.open_output_button)
         layout.addStretch()
         self.steps.addWidget(page)
 
@@ -359,7 +374,9 @@ class MontageLab(QMainWindow):
         while self.profile_list.count():
             item = self.profile_list.takeAt(0); widget = item.widget()
             if widget: widget.deleteLater()
-        builtin = QPushButton("Battlefield 6 · Skull Row（内置）"); builtin.setCheckable(True); builtin.setChecked(True); self.game_buttons.addButton(builtin); self.profile_list.addWidget(builtin)
+        builtin = QPushButton("Battlefield 6 · Skull Row（内置）"); builtin.setCheckable(True); self.game_buttons.addButton(builtin); self.profile_list.addWidget(builtin)
+        builtin.setProperty("workflow_path", str(Path(__file__).resolve().parents[1] / "examples" / "battlefield6_workflow.json"))
+        builtin.clicked.connect(lambda checked=False, button=builtin: self._select_profile(button))
         for path in sorted(self.profiles_dir.glob("*-workflow.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8")); game = data.get("game", {}).get("display_name", path.stem); rules = data.get("detectors", {}).get("rules", [])
@@ -367,12 +384,20 @@ class MontageLab(QMainWindow):
                 button = QPushButton(f"{game} | {len(rules)} rules | {labels}")
                 button.setProperty("workflow_path", str(path))
                 button.setCheckable(True); self.game_buttons.addButton(button); self.profile_list.addWidget(button)
+                button.clicked.connect(lambda checked=False, selected=button: self._select_profile(selected))
             except (OSError, json.JSONDecodeError):
                 continue
 
+        last_path = str(self.settings.value("last_workflow_path", ""))
         buttons = self.game_buttons.buttons()
-        if buttons:
-            buttons[0].setProperty("workflow_path", str(Path(__file__).resolve().parents[1] / "examples" / "battlefield6_workflow.json"))
+        selected = next((button for button in buttons if str(button.property("workflow_path")) == last_path), buttons[0] if buttons else None)
+        if selected is not None:
+            selected.setChecked(True)
+
+    def _select_profile(self, button: QPushButton) -> None:
+        path = button.property("workflow_path")
+        if path:
+            self.settings.setValue("last_workflow_path", str(path))
 
     def _selected_workflow(self) -> MontageWorkflow:
         button = self.game_buttons.checkedButton()
@@ -394,14 +419,33 @@ class MontageLab(QMainWindow):
             from .workflow import EditRules
             values = {"event_pre_seconds": float(self.rule_boxes["pre"].text()), "event_post_seconds": float(self.rule_boxes["post"].text()), "merge_gap_seconds": float(self.rule_boxes["merge"].text()), "long_gap_bridge_seconds": float(self.rule_boxes["bridge"].text()), "fade_to_black_seconds": float(self.rule_boxes["fade"].text())}
             workflow = replace(workflow, edit_rules=EditRules(**values))
-            request = GenerationRequest(workflow, source, Path("D:/91/集锦/work"), Path("D:/91/集锦/output"), Path(self.music_file.text()) if self.music_file.text() else None, workflow_path=Path(str(self.game_buttons.checkedButton().property("workflow_path"))) if self.game_buttons.checkedButton() and self.game_buttons.checkedButton().property("workflow_path") else None)
+            from .config import load_config
+            pipeline = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
+            selected_button = self.game_buttons.checkedButton()
+            workflow_path = Path(str(selected_button.property("workflow_path"))) if selected_button and selected_button.property("workflow_path") else None
+            request = GenerationRequest(
+                workflow,
+                source,
+                pipeline.work_dir,
+                pipeline.output_dir,
+                Path(self.music_file.text()) if self.music_file.text() else None,
+                source_paths=self._selected_source_paths,
+                workflow_path=workflow_path,
+                render=True,
+            )
         except Exception as exc:
             self.generation_status.setText(f"Generation setup failed: {exc}")
             return
         self.generation_log.clear()
+        self.last_generation_result = None
         self.generation_progress.setValue(0)
         self.generation_status.setText("Scanning in background…")
+        self.generation_result.setText("正在构建项目和渲染 MP4…")
+        self.open_output_button.setEnabled(False)
         self.generate_button.setEnabled(False)
+        self.back.setEnabled(False)
+        self.next.setEnabled(False)
+        self.settings_button.setEnabled(False)
         self._generation_thread = QThread(self)
         self._generation_worker = GenerationWorker(request)
         self._generation_worker.moveToThread(self._generation_thread)
@@ -424,17 +468,27 @@ class MontageLab(QMainWindow):
         self.generation_log.append(message)
 
     def _on_generation_success(self, result: GenerationResult) -> None:
+        self.last_generation_result = result
         self.generation_progress.setValue(100)
         self.generation_status.setText(f"{result.status}: {len(result.events)} events · {result.run_dir}")
+        self.generation_result.setText(
+            f"项目：{result.project_path or '未生成'}\n输出：{result.output_path or '未渲染'}"
+        )
+        self.open_output_button.setEnabled(bool(result.output_path))
+        if result.output_path:
+            self.settings.setValue("last_output_path", str(result.output_path))
         for diagnostic in result.diagnostics:
             self.generation_log.append(diagnostic)
 
     def _on_generation_failure(self, message: str) -> None:
         self.generation_status.setText(f"Generation failed: {message}")
+        self.generation_result.setText("生成失败；请查看下方日志和 diagnostics.json。")
         self.generation_log.append(message)
 
     def _generation_finished(self) -> None:
         self.generate_button.setEnabled(True)
+        self.settings_button.setEnabled(True)
+        self._refresh_navigation()
         self._generation_worker = None
         self._generation_thread = None
         if self._deferred_close:
@@ -452,21 +506,52 @@ class MontageLab(QMainWindow):
     def open_custom_profile(self) -> None:
         wizard = ProfileWizard(self.profiles_dir, self)
         if wizard.exec():
-            self.settings.setValue("last_custom_profile", wizard.name.text().strip()); self.refresh_profiles()
+            profile_path = self.profiles_dir / f"{wizard._profile().game_id}-workflow.json"
+            self.settings.setValue("last_custom_profile", wizard.name.text().strip())
+            self.settings.setValue("last_workflow_path", str(profile_path))
+            self.refresh_profiles()
 
     def import_profile(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "导入工作流配置", "", "Workflow JSON (*.json)")
-        if selected: QMessageBox.information(self, "已导入", f"已选择配置：\n{selected}")
+        if not selected:
+            return
+        try:
+            workflow = MontageWorkflow.import_json(Path(selected))
+            target = self.profiles_dir / f"{workflow.game_id}-workflow.json"
+            suffix = 2
+            while target.exists():
+                target = self.profiles_dir / f"{workflow.game_id}-{suffix}-workflow.json"
+                suffix += 1
+            workflow.export_desktop_json(target)
+            self.settings.setValue("last_workflow_path", str(target))
+            self.refresh_profiles()
+            QMessageBox.information(self, "已导入", f"配置已保存到：\n{target}")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
 
     def select_video_folder(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Select source folder")
         if selected:
+            self._selected_source_paths = None
             self.video_folder.setText(str(Path(selected).resolve(strict=False)))
             self.settings.setValue("video_folder", selected)
+            count = sum(1 for path in Path(selected).rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES)
+            self.video_count.setText(f"{count} 个视频")
+
+    def select_video_file(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(self, "选择单个视频试产", "", "Video (*.mp4 *.mkv *.mov *.webm)")
+        if selected:
+            path = Path(selected).resolve(strict=False)
+            self._selected_source_paths = (path,)
+            self.video_folder.setText(str(path.parent))
+            self.video_count.setText(f"单个试产：{path.name}")
+            self.settings.setValue("video_folder", str(path.parent))
 
     def select_music(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "选择背景音乐", "", "Audio/Video (*.mp3 *.wav *.m4a *.aac *.mp4 *.mkv)")
-        if selected: self.music_file.setText(selected)
+        if selected:
+            self.music_file.setText(str(Path(selected).resolve(strict=False)))
+            self.settings.setValue("music_file", selected)
 
     def open_settings(self) -> None:
         dialog = QDialog(self); dialog.setWindowTitle("全局设置"); form = QFormLayout(dialog)
@@ -482,7 +567,39 @@ class MontageLab(QMainWindow):
 
     def _restore_preferences(self) -> None:
         folder = self.settings.value("video_folder", "")
-        if folder: self.video_folder.setText(str(folder))
+        self._selected_source_paths: tuple[Path, ...] | None = None
+        if folder:
+            self.video_folder.setText(str(folder))
+            path = Path(str(folder))
+            if path.is_dir():
+                count = sum(1 for item in path.rglob("*") if item.is_file() and item.suffix.lower() in VIDEO_SUFFIXES)
+                self.video_count.setText(f"{count} 个视频")
+        music = self.settings.value("music_file", "")
+        if music:
+            self.music_file.setText(str(music))
+
+    def _migrate_legacy_profiles(self) -> None:
+        legacy = Path("D:/HKEY_CURRENT_USER/Software/MontageLab/profiles")
+        if not legacy.is_dir():
+            return
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        for source in legacy.glob("*-workflow.json"):
+            target = self.profiles_dir / source.name
+            if not target.exists():
+                try:
+                    shutil.copy2(source, target)
+                except OSError:
+                    continue
+            if str(self.settings.value("last_workflow_path", "")) == str(source):
+                self.settings.setValue("last_workflow_path", str(target))
+
+    def open_output_directory(self) -> None:
+        output = Path(self.settings.value("last_output_path", ""))
+        if not output:
+            return
+        directory = output if output.is_dir() else output.parent
+        if directory.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
     def advance(self) -> None:
         current = self.steps.currentIndex()

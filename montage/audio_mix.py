@@ -8,15 +8,35 @@ def build_audio_filter(
     music_label: str,
     game_gain_db: float,
     music_gain_db: float,
+    *,
+    duration: float | None = None,
+    target_lufs: float = -14.0,
+    true_peak_db: float = -1.0,
+    sample_rate: int = 48000,
+    channels: int = 2,
 ) -> str:
+    """Build the legacy game/music graph, optionally bounded for a project clip."""
+    if duration is not None and duration <= 0:
+        raise ValueError("audio duration must be positive")
+    if channels not in (1, 2):
+        raise ValueError("audio channels must be 1 or 2")
+    tail = ""
+    if duration is not None:
+        tail = f",apad=whole_dur={duration:.3f},atrim=duration={duration:.3f}"
     return (
-        f"[{game_label}]volume={game_gain_db:.3f}dB[game_gain];"
-        f"[{music_label}]volume={music_gain_db:.3f}dB[music_gain];"
-        "[music_gain][game_gain]sidechaincompress="
+        f"[{game_label}]aresample={int(sample_rate)},aformat=sample_fmts=fltp:"
+        f"sample_rates={int(sample_rate)}:channel_layouts={'mono' if channels == 1 else 'stereo'},"
+        f"volume={game_gain_db:.3f}dB[game_gain];"
+        f"[{music_label}]aresample={int(sample_rate)},aformat=sample_fmts=fltp:"
+        f"sample_rates={int(sample_rate)}:channel_layouts={'mono' if channels == 1 else 'stereo'},"
+        f"volume={music_gain_db:.3f}dB[music_gain];"
+        "[game_gain]asplit=2[game_sidechain][game_mix];"
+        "[music_gain][game_sidechain]sidechaincompress="
         "threshold=0.04:ratio=2.4:attack=50:release=500:makeup=1[ducked_music];"
-        "[game_gain][ducked_music]amix=inputs=2:duration=first:"
-        "dropout_transition=0:normalize=0,aresample=async=1:first_pts=0,"
-        "loudnorm=I=-14:TP=-1[aout]"
+        "[game_mix][ducked_music]amix=inputs=2:duration=first:"
+        "dropout_transition=0,"
+        f"aresample={int(sample_rate)}:async=1:first_pts=0,"
+        f"loudnorm=I={target_lufs:.1f}:TP={true_peak_db:.1f}{tail}[aout]"
     )
 
 
