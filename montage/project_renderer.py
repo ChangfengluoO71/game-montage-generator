@@ -41,6 +41,9 @@ def _settings(project: EditableProject, config: PipelineConfig) -> dict[str, Any
         raw.get("fade_to_black_seconds", project.workflow.edit_rules.fade_to_black_seconds),
         "fade_to_black_seconds",
     )
+    allow_early_end = raw.get("allow_early_end", project.workflow.edit_rules.allow_early_end)
+    if not isinstance(allow_early_end, bool):
+        raise ValueError("allow_early_end must be a boolean")
     music_in = _number(raw.get("music_in", raw.get("music_start", 0.0)), "music_in")
     audio = dict(config.audio_mix)
     audio.update(project.workflow.audio_output or {})
@@ -53,6 +56,7 @@ def _settings(project: EditableProject, config: PipelineConfig) -> dict[str, Any
         "height": height,
         "fps": fps,
         "fade": fade,
+        "allow_early_end": allow_early_end,
         "music_in": music_in,
         "game_gain_db": _number(audio.get("game_gain_db", -3.0), "game_gain_db", minimum=None),
         "music_gain_db": _number(audio.get("music_gain_db", -9.0), "music_gain_db", minimum=None),
@@ -257,16 +261,24 @@ def _compile_concat_argv(
     total_duration: float,
 ) -> list[str]:
     encoder, encoder_args = _output_encoder(toolchain)
-    video_map = ["-map", "0:v:0"]
-    if settings["fade"] > 0:
+    stream_maps = ["-map", "0:v:0", "-map", "0:a:0"]
+    if settings["allow_early_end"] and settings["fade"] > 0:
         fade = min(settings["fade"], total_duration)
+        fade_start = max(0.0, total_duration - fade)
         filter_args = [
             "-filter_complex",
-            f"[0:v:0]fade=t=out:st={max(0.0, total_duration - fade):.3f}:d={fade:.3f}[vout]",
+            ";".join(
+                (
+                    f"[0:v:0]fade=t=out:st={fade_start:.3f}:d={fade:.3f}[vout]",
+                    f"[0:a:0]afade=t=out:st={fade_start:.3f}:d={fade:.3f}[aout]",
+                )
+            ),
             "-map",
             "[vout]",
+            "-map",
+            "[aout]",
         ]
-        video_map = filter_args
+        stream_maps = filter_args
     return [
         str(toolchain.ffmpeg),
         "-hide_banner",
@@ -279,9 +291,7 @@ def _compile_concat_argv(
         "0",
         "-i",
         str(concat_list),
-        *video_map,
-        "-map",
-        "0:a:0",
+        *stream_maps,
         "-vsync",
         "cfr",
         "-r",

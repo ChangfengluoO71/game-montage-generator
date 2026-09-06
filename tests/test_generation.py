@@ -89,7 +89,7 @@ def test_generation_persists_source_ledger_and_event_provenance(tmp_path: Path, 
 
     monkeypatch.setattr(
         "montage.generation.scan_template_source",
-        lambda record, rule, toolchain, progress=None: [
+        lambda record, rule, toolchain, progress=None, **kwargs: [
             GenerationEvent(source_id_for_path(record.file_path), "evt-1", 1.25, rule.id, rule.label, 0.91, {"positive_samples": []})
         ],
     )
@@ -105,6 +105,36 @@ def test_generation_persists_source_ledger_and_event_provenance(tmp_path: Path, 
     ledger = json.loads(result.source_ledger_path.read_text(encoding="utf-8"))
     assert ledger["sources"][0]["source_path"] == str(source.resolve())
     assert ledger["sources"][0]["width"] == 1280
+
+
+def test_generation_rejects_music_without_audio_before_scanning(tmp_path: Path, monkeypatch) -> None:
+    source_dir = tmp_path / "素材"
+    source_dir.mkdir()
+    source = source_dir / "clip.mp4"
+    source.write_bytes(b"fixture")
+    music = tmp_path / "video-only.mp4"
+    music.write_bytes(b"fixture")
+    request = GenerationRequest(
+        _workflow(),
+        source_dir,
+        tmp_path / "work",
+        tmp_path / "output",
+        music,
+        source_paths=(source,),
+    )
+
+    class Toolchain:
+        ffprobe = "ffprobe.exe"
+
+    monkeypatch.setattr("montage.generation.discover_toolchain", lambda config: Toolchain())
+    monkeypatch.setattr(
+        "montage.generation.run_command",
+        lambda *args, **kwargs: __import__("subprocess").CompletedProcess(args[0], 0, '{"streams":[]}', ""),
+    )
+    monkeypatch.setattr("montage.generation.probe_media", lambda *args, **kwargs: pytest.fail("video scan started"))
+
+    with pytest.raises(GenerationFailure, match="no audio stream"):
+        run_generation(request)
 
 
 def test_template_match_uses_unicode_path_and_rising_edge(tmp_path: Path) -> None:
@@ -226,7 +256,7 @@ def test_generation_exports_project_and_renders_when_requested(tmp_path: Path, m
     monkeypatch.setattr("montage.generation.discover_toolchain", lambda config: object())
     monkeypatch.setattr(
         "montage.generation.scan_template_source",
-        lambda record, rule, toolchain, progress=None: [
+        lambda record, rule, toolchain, progress=None, **kwargs: [
             GenerationEvent(source_id_for_path(record.file_path), "evt-1", 1.25, rule.id, rule.label, 0.91, {})
         ],
     )

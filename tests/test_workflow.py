@@ -149,6 +149,7 @@ def test_desktop_workflow_imports_as_multi_rule_engine_contract() -> None:
             "merge_gap_seconds": 3.0,
             "long_gap_bridge_seconds": 1.0,
             "fade_to_black_seconds": 5.0,
+            "allow_early_end": True,
         },
         "audio_output": {
             "game_gain_db": -6.0,
@@ -173,3 +174,11 @@ def test_desktop_workflow_imports_as_multi_rule_engine_contract() -> None:
 def test_non_finite_workflow_values_rejected(factory) -> None:
     with pytest.raises(ValueError, match="finite"):
         factory().validate()
+
+
+def test_early_end_rule_is_serialized_and_requires_a_boolean() -> None:
+    rules = EditRules(allow_early_end=False, fade_to_black_seconds=4.5)
+    assert rules.to_dict()["allow_early_end"] is False
+    assert rules.to_dict()["fade_to_black_seconds"] == 4.5
+    with pytest.raises(ValueError, match="allow_early_end"):
+        EditRules(allow_early_end=1).validate()

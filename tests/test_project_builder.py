@@ -37,7 +37,7 @@ def test_build_project_bounds_windows_and_assigns_contiguous_timeline() -> None:
     assert project.clips[0].review_status == "pending"
     assert "击杀" in project.clips[0].ai_reason
     assert project.music_source == "D:/music.mp3"
-    assert project.render_settings == {"encoder": "libx264", "fade_to_black_seconds": 4.0}
+    assert project.render_settings == {"encoder": "libx264", "fade_to_black_seconds": 4.0, "allow_early_end": True}
 
 
 def test_build_project_merges_overlapping_and_nearby_same_source_events() -> None:
@@ -118,6 +118,7 @@ def test_build_project_empty_music_and_render_settings_are_preserved() -> None:
 
     assert project.music_source is None
     assert project.render_settings["fade_to_black_seconds"] == 4.0
+    assert project.render_settings["allow_early_end"] is True
 
 
 def test_build_project_project_json_round_trip(tmp_path: Path) -> None:

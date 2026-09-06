@@ -17,6 +17,9 @@ def test_config_resolves_audited_unicode_paths():
     assert config.music_file.name == "01. 決意の唄.flac"
     assert config.output_width == 1920
     assert config.output_height == 1200
+    assert config.template_scan_fps == 30.0
+    assert config.template_decode_height == 720
+    assert config.template_cache_enabled is True
 
 
 def test_cache_key_changes_when_mtime_changes():

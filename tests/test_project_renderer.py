@@ -76,8 +76,29 @@ def test_render_project_compiles_settings_and_timeline_music(tmp_path, base_conf
     ss_positions = [index for index, value in enumerate(commands[0]) if value == "-ss"]
     assert [commands[0][index + 1] for index in ss_positions] == ["1.000", "0.000"]
     assert "fade=t=out" in commands[2][commands[2].index("-filter_complex") + 1]
+    assert "afade=t=out" in commands[2][commands[2].index("-filter_complex") + 1]
     assert "st=0.000:d=4.000" in commands[2][commands[2].index("-filter_complex") + 1]
     assert commands[2][-1].endswith(".tmp.mp4")
+
+
+def test_render_project_can_disable_early_end_fade(tmp_path, base_config, fake_toolchain, monkeypatch):
+    project = _project(tmp_path)
+    project.render_settings["allow_early_end"] = False
+    commands: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        commands.append([str(value) for value in argv])
+        output = Path(str(argv[-1]))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"encoded")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("montage.project_renderer.run_command", fake_run)
+    render_project(project, base_config, fake_toolchain, tmp_path / "output" / "no-fade.mp4")
+
+    concat = commands[-1]
+    assert "-filter_complex" not in concat
+    assert "-map" in concat and "0:a:0" in concat
 
 
 def test_render_project_supports_no_music_and_missing_game_audio(tmp_path, base_config, fake_toolchain, monkeypatch):

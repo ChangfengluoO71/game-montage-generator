@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from montage.desktop_app import CustomProfile, DetectionRule, ProfileWizard
+from montage.desktop_app import CustomProfile, DetectionRule, MontageLab, ProfileWizard
 from montage.workflow import DetectorConfig, EditRules, MontageWorkflow, WorkflowRule
 
 
@@ -91,4 +91,32 @@ def test_profile_wizard_append_preserves_existing_engine_rule_and_workflow_field
     assert restored.metadata == existing.metadata
     assert restored.edit_rules.to_dict() == existing.edit_rules.to_dict()
     assert restored.audio_output == existing.audio_output | {"target_lufs": -16.0, "true_peak_db": -2.0}
+    del app
+
+
+def test_select_music_rejects_file_without_audio_before_persisting(tmp_path: Path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MontageLab()
+    window.settings.clear()
+    selected = tmp_path / "video-only.mp4"
+    selected.write_bytes(b"fixture")
+    warnings: list[str] = []
+
+    monkeypatch.setattr(
+        "montage.desktop_app.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(selected), ""),
+    )
+    monkeypatch.setattr(window, "_validate_music_file", lambda path: (False, "no audio stream"))
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append(str(args[2] if len(args) > 2 else "")),
+    )
+
+    window.select_music()
+
+    assert window.music_file.text() == ""
+    assert window.settings.value("music_file", "") == ""
+    assert warnings and "no audio stream" in warnings[0]
+    window.close()
     del app

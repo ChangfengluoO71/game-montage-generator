@@ -18,7 +18,7 @@ from .models import MediaRecord
 from .project_builder import build_project
 from .project_renderer import render_project
 from .template_detection import TemplateEvent, scan_template_source
-from .toolchain import discover_toolchain
+from .toolchain import discover_toolchain, run_command
 from .workflow import DetectorConfig, MontageWorkflow, WorkflowRule
 
 ProgressCallback = Callable[[int, str], None]
@@ -229,6 +229,34 @@ def _emit(callback: ProgressCallback | None, percent: int, message: str) -> None
         callback(max(0, min(100, int(percent))), message)
 
 
+def _music_has_audio(path: Path, toolchain: object) -> bool:
+    """Return whether a selected music container exposes an audio stream."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    ffprobe = getattr(toolchain, "ffprobe", None)
+    if ffprobe is None:
+        raise ValueError("selected music cannot be probed because ffprobe is unavailable")
+    result = run_command(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "json",
+            path,
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"ffprobe could not inspect selected music: {path}")
+    payload = json.loads(result.stdout or "{}")
+    return bool(payload.get("streams"))
+
+
 def run_generation(
     request: GenerationRequest,
     progress: ProgressCallback | None = None,
@@ -253,6 +281,13 @@ def run_generation(
     try:
         _emit(progress, 2, "准备扫描素材")
         toolchain = discover_toolchain(config) if selected_paths else None
+        if request.music_source is not None:
+            if toolchain is None:
+                toolchain = discover_toolchain(config)
+            if not _music_has_audio(request.music_source, toolchain):
+                raise GenerationFailure(
+                    f"Selected music has no audio stream: {request.music_source}; choose an audio-bearing file"
+                )
         explicit_sources = request.source_paths is not None
         for index, path in enumerate(selected_paths):
             _emit(progress, 5 + int(index * 15 / max(1, len(selected_paths))), f"索引素材 {path.name}")
@@ -309,7 +344,7 @@ def run_generation(
                             panel_disappear_s=config.v6_panel_disappear_s,
                             refinement_radius_s=config.v6_refinement_radius_s,
                         ),
-                        cache_dir=run_dir / "cache" if request.use_cache else None,
+                        cache_dir=config.v6_cache_dir if request.use_cache else None,
                         raw_dir=request.source_dir,
                         use_cache=request.use_cache,
                         progress=lambda value, message, base=base, scan_span=scan_span: _emit(progress, base + int(value * scan_span / 100.0), message),
@@ -329,6 +364,10 @@ def run_generation(
                         rule,
                         toolchain,
                         progress=lambda value, message, base=base, scan_span=scan_span: _emit(progress, base + int(value * scan_span / 100.0), message),
+                        fps_cap=config.template_scan_fps,
+                        decode_height=config.template_decode_height,
+                        cache_dir=config.cache_dir / "template-match" if request.use_cache and config.template_cache_enabled else None,
+                        use_cache=request.use_cache and config.template_cache_enabled,
                     )
                     for event in detections:
                         if isinstance(event, TemplateEvent):
@@ -371,6 +410,7 @@ def run_generation(
                 "height": config.output_height,
                 "fps": config.target_fps,
                 "fade_to_black_seconds": workflow.edit_rules.fade_to_black_seconds,
+                "allow_early_end": workflow.edit_rules.allow_early_end,
             },
         )
         project_path = run_dir / "project.json"

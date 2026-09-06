@@ -19,6 +19,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -53,6 +54,7 @@ DEFAULT_EDIT_RULES = {
     "merge_gap_seconds": 2.0,
     "long_gap_bridge_seconds": 2.0,
     "fade_to_black_seconds": 5.0,
+    "allow_early_end": True,
 }
 
 
@@ -304,6 +306,7 @@ class MontageLab(QMainWindow):
         self._migrate_legacy_profiles()
         self._generation_thread: QThread | None = None
         self._generation_worker: GenerationWorker | None = None
+        self._music_validation_toolchain = None
         self.last_generation_result: GenerationResult | None = None
         self._deferred_close = False
         self._build_ui(); self._restore_preferences(); self.refresh_profiles()
@@ -333,9 +336,17 @@ class MontageLab(QMainWindow):
         self.music_file = QLineEdit(); self.music_file.setReadOnly(True); choose_music = QPushButton("选择背景音乐"); choose_music.clicked.connect(self.select_music); row2 = QHBoxLayout(); row2.addWidget(self.music_file); row2.addWidget(choose_music); form.addRow("背景音乐（独立）", row2); form.addRow(QLabel("视频文件夹只会扫描，不会改写 RAW；MP4 音乐会在后续 worker 中提取第一条音轨。")); self.steps.addWidget(page)
 
     def _build_rules_page(self) -> None:
-        page = QWidget(); form = QFormLayout(page); form.addRow(QLabel("步骤 3：剪辑规则", objectName="heading")); self.rule_boxes = {}
-        for key, label, value in (("pre", "事件前导（秒）", 1.5), ("post", "事件后保留（秒）", .5), ("merge", "合并阈值（秒）", 2.0), ("bridge", "桥接长度（秒）", 2.0), ("fade", "结尾淡黑（秒）", 5.0)):
-            box = QLineEdit(str(value)); self.rule_boxes[key] = box; form.addRow(label, box)
+        page = QWidget()
+        form = QFormLayout(page)
+        form.addRow(QLabel("步骤 3：剪辑规则", objectName="heading"))
+        self.rule_boxes = {}
+        for key, label, value in (("pre", "事件前导（秒）", 1.5), ("post", "事件后保留（秒）", .5), ("merge", "合并阈值（秒）", 2.0), ("bridge", "桥接长度（秒）", 2.0), ("fade", "提前结束淡出（秒）", 5.0)):
+            box = QLineEdit(str(value))
+            self.rule_boxes[key] = box
+            form.addRow(label, box)
+        self.allow_early_end = QCheckBox("素材不足时允许提前结束（画面淡黑、音频淡出）")
+        self.allow_early_end.setChecked(True)
+        form.addRow("素材不足策略", self.allow_early_end)
         self.steps.addWidget(page)
 
     def _build_ready_page(self) -> None:
@@ -413,11 +424,18 @@ class MontageLab(QMainWindow):
         if not source.is_dir():
             self.generation_status.setText("Select an existing source directory before starting.")
             return
+        music_text = self.music_file.text().strip()
+        music_source = Path(music_text).resolve(strict=False) if music_text else None
+        if music_source is not None:
+            valid, message = self._validate_music_file(music_source)
+            if not valid:
+                self.generation_status.setText(f"Music selection is invalid: {message}")
+                return
         try:
             workflow = self._selected_workflow()
             from dataclasses import replace
             from .workflow import EditRules
-            values = {"event_pre_seconds": float(self.rule_boxes["pre"].text()), "event_post_seconds": float(self.rule_boxes["post"].text()), "merge_gap_seconds": float(self.rule_boxes["merge"].text()), "long_gap_bridge_seconds": float(self.rule_boxes["bridge"].text()), "fade_to_black_seconds": float(self.rule_boxes["fade"].text())}
+            values = {"event_pre_seconds": float(self.rule_boxes["pre"].text()), "event_post_seconds": float(self.rule_boxes["post"].text()), "merge_gap_seconds": float(self.rule_boxes["merge"].text()), "long_gap_bridge_seconds": float(self.rule_boxes["bridge"].text()), "fade_to_black_seconds": float(self.rule_boxes["fade"].text()), "allow_early_end": self.allow_early_end.isChecked()}
             workflow = replace(workflow, edit_rules=EditRules(**values))
             from .config import load_config
             pipeline = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
@@ -428,7 +446,7 @@ class MontageLab(QMainWindow):
                 source,
                 pipeline.work_dir,
                 pipeline.output_dir,
-                Path(self.music_file.text()) if self.music_file.text() else None,
+                music_source,
                 source_paths=self._selected_source_paths,
                 workflow_path=workflow_path,
                 render=True,
@@ -548,10 +566,43 @@ class MontageLab(QMainWindow):
             self.settings.setValue("video_folder", str(path.parent))
 
     def select_music(self) -> None:
-        selected, _ = QFileDialog.getOpenFileName(self, "选择背景音乐", "", "Audio/Video (*.mp3 *.wav *.m4a *.aac *.mp4 *.mkv)")
-        if selected:
-            self.music_file.setText(str(Path(selected).resolve(strict=False)))
-            self.settings.setValue("music_file", selected)
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select background music",
+            "",
+            "Audio/Video (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.mp4 *.mkv *.mov *.webm)",
+        )
+        if not selected:
+            return
+        path = Path(selected).resolve(strict=False)
+        valid, message = self._validate_music_file(path)
+        if not valid:
+            QMessageBox.warning(
+                self,
+                "\u97f3\u4e50\u6587\u4ef6\u65e0\u97f3\u8f68",
+                message or "The selected file has no audio stream. Choose an audio-bearing file.",
+            )
+            return
+        self.music_file.setText(str(path))
+        self.settings.setValue("music_file", str(path))
+
+    def _validate_music_file(self, path: Path) -> tuple[bool, str]:
+        """Probe a user-selected music container before it enters the workflow."""
+        if not path.is_file():
+            return False, f"Music file does not exist: {path}"
+        try:
+            from .config import load_config
+            from .generation import _music_has_audio
+            from .toolchain import discover_toolchain
+
+            if self._music_validation_toolchain is None:
+                config_path = Path(__file__).resolve().parents[1] / "config.yaml"
+                self._music_validation_toolchain = discover_toolchain(load_config(config_path))
+            if not _music_has_audio(path, self._music_validation_toolchain):
+                return False, f"Selected file has no audio stream: {path}"
+        except Exception as exc:
+            return False, f"Unable to inspect selected music: {exc}"
+        return True, ""
 
     def open_settings(self) -> None:
         dialog = QDialog(self); dialog.setWindowTitle("全局设置"); form = QFormLayout(dialog)
@@ -576,7 +627,12 @@ class MontageLab(QMainWindow):
                 self.video_count.setText(f"{count} 个视频")
         music = self.settings.value("music_file", "")
         if music:
-            self.music_file.setText(str(music))
+            path = Path(str(music)).resolve(strict=False)
+            valid, _ = self._validate_music_file(path)
+            if valid:
+                self.music_file.setText(str(path))
+            else:
+                self.settings.remove("music_file")
 
     def _migrate_legacy_profiles(self) -> None:
         legacy = Path("D:/HKEY_CURRENT_USER/Software/MontageLab/profiles")
@@ -605,10 +661,11 @@ class MontageLab(QMainWindow):
         current = self.steps.currentIndex()
         if current == 1 and not self.video_folder.text(): QMessageBox.warning(self, "缺少素材", "请选择视频素材文件夹。"); return
         if current == 2:
-            try: bridge = float(self.rule_boxes["bridge"].text()); merge = float(self.rule_boxes["merge"].text())
+            try: bridge = float(self.rule_boxes["bridge"].text()); merge = float(self.rule_boxes["merge"].text()); fade = float(self.rule_boxes["fade"].text())
             except ValueError: QMessageBox.warning(self, "规则无效", "剪辑规则必须是数字。"); return
             if bridge > merge: QMessageBox.warning(self, "规则无效", "桥接长度不能超过合并阈值。"); return
-        if current == 2: self.summary.setText(f"视频素材：{self.video_folder.text() or '未选择'}\n背景音乐：{self.music_file.text() or '未选择'}\n事件窗口：前 {self.rule_boxes['pre'].text()} 秒，后 {self.rule_boxes['post'].text()} 秒")
+            if fade < 0: QMessageBox.warning(self, "规则无效", "提前结束淡出时长不能为负数。"); return
+        if current == 2: self.summary.setText(f"视频素材：{self.video_folder.text() or '未选择'}\n背景音乐：{self.music_file.text() or '未选择'}\n事件窗口：前 {self.rule_boxes['pre'].text()} 秒，后 {self.rule_boxes['post'].text()} 秒\n素材不足时提前结束：{'允许' if self.allow_early_end.isChecked() else '不允许'}，淡出 {self.rule_boxes['fade'].text()} 秒")
         self.steps.setCurrentIndex(min(3, current + 1)); self._refresh_navigation()
 
     def previous(self) -> None:

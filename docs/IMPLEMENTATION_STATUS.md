@@ -34,3 +34,12 @@
 - `python -m pytest -q`：268 passed，2 warnings。
 - 目标模块 `python -m py_compile`：通过。
 - `QT_QPA_PLATFORM=offscreen`：可创建 4 页 `MontageLab`，按钮真实运行完成。
+
+## Follow-up validation: audio preflight and scan acceleration (2026-09-06)
+
+- Music selection now probes the chosen container with `ffprobe -select_streams a:0` before persisting it. A video-only MP4 is rejected at Step 2 and the worker repeats the same guard before scanning.
+- Early-end policy is exported through `EditRules`, `EditableProject.render_settings`, and the renderer. When enabled, the final video and audio streams receive the configured fade; disabling it keeps direct stream mapping.
+- Template-match fallback keeps a 30 FPS accuracy floor, decodes at a configurable 720p height, and writes cache entries under `work/cache/template-match`. V6 cache entries now persist under `work/analysis/v6_kill_truth/cache`.
+- Real trial: `work/generation-runs/20260906-140852-76864e0e` produced `output/cod20-20260906-140852-76864e0e.mp4`; FFprobe reported H.264 1920x1200 plus AAC, and a full FFmpeg decode returned 0.
+- Invalid music trial: `work/generation-runs/20260906-141004-d6018099` stopped before source indexing with `Selected music has no audio stream`.
+- Verification: `273 passed, 2 warnings`, `py_compile OK`, and the offscreen Qt smoke created all four pages.

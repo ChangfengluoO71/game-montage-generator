@@ -37,12 +37,15 @@ class EditRules:
     merge_gap_seconds: float = 2.0
     long_gap_bridge_seconds: float = 2.0
     fade_to_black_seconds: float = 5.0
+    allow_early_end: bool = True
 
     def validate(self) -> None:
         values = (self.event_pre_seconds, self.event_post_seconds, self.merge_gap_seconds,
                   self.long_gap_bridge_seconds, self.fade_to_black_seconds)
         if any(_finite_number(value, "editing rule durations") < 0 for value in values):
             raise ValueError("editing rule durations must be non-negative")
+        if not isinstance(self.allow_early_end, bool):
+            raise ValueError("allow_early_end must be a boolean")
         if self.long_gap_bridge_seconds > self.merge_gap_seconds:
             raise ValueError("long gap bridge cannot exceed merge gap")
 
@@ -50,7 +53,8 @@ class EditRules:
         self.validate()
         return {"event_pre_seconds": self.event_pre_seconds, "event_post_seconds": self.event_post_seconds,
                 "merge_gap_seconds": self.merge_gap_seconds, "long_gap_bridge_seconds": self.long_gap_bridge_seconds,
-                "fade_to_black_seconds": self.fade_to_black_seconds}
+                "fade_to_black_seconds": self.fade_to_black_seconds,
+                "allow_early_end": self.allow_early_end}
 
 
 @dataclass

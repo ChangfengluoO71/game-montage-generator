@@ -159,6 +159,7 @@ def build_project(
 
     settings = deepcopy(render_settings) if render_settings is not None else {}
     settings.setdefault("fade_to_black_seconds", workflow_snapshot.edit_rules.fade_to_black_seconds)
+    settings.setdefault("allow_early_end", workflow_snapshot.edit_rules.allow_early_end)
     project = EditableProject(project_id, workflow_snapshot, clips, ledger_snapshot, deepcopy(music_source), settings)
     project.to_dict()
     return project

@@ -12,6 +12,8 @@ from typing import Callable, Iterable, Sequence
 import cv2
 import numpy as np
 
+from .cache import cache_key, file_fingerprint, read_cached_json, write_cached_json
+
 
 @dataclass(frozen=True)
 class TemplateEvent:
@@ -21,6 +23,27 @@ class TemplateEvent:
     rule_id: str
     label: str
     evidence: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "timestamp": float(self.timestamp),
+            "confidence": float(self.confidence),
+            "source_id": self.source_id,
+            "rule_id": self.rule_id,
+            "label": self.label,
+            "evidence": dict(self.evidence),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "TemplateEvent":
+        return cls(
+            float(data["timestamp"]),
+            float(data["confidence"]),
+            str(data["source_id"]),
+            str(data["rule_id"]),
+            str(data["label"]),
+            dict(data.get("evidence") or {}),
+        )
 
 
 def load_image_unicode(path: Path) -> np.ndarray:
@@ -151,14 +174,77 @@ def scan_template_frames(
     return events
 
 
-def iter_full_frames(toolchain: object, source: Path, *, width: int, height: int, fps: float) -> Iterable[tuple[float, np.ndarray]]:
+def _path_fingerprint(path: Path) -> dict[str, object]:
+    try:
+        return file_fingerprint(path)
+    except (FileNotFoundError, OSError):
+        return {"absolute_path": str(path.resolve(strict=False))}
+
+
+def _template_cache_key(
+    record: object,
+    rule: object,
+    toolchain: object,
+    *,
+    fps_cap: float,
+    decode_height: int | None,
+) -> str:
+    detector = rule.detector
+    source = Path(record.file_path)
+    template_values = [str(_path_value(value).resolve(strict=False)) for value in detector.templates]
+    positive_values = [str(Path(value).resolve(strict=False)) for value in detector.positive_samples]
+    detector_parameters = {
+        "templates": [{"path": value, "fingerprint": _path_fingerprint(Path(value))} for value in template_values],
+        "positive_samples": [{"path": value, "fingerprint": _path_fingerprint(Path(value))} for value in positive_values],
+        "roi": {key: float(detector.roi[key]) for key in ("x1", "y1", "x2", "y2")},
+        "threshold": float(detector.thresholds.get("template", 0.65)),
+        "rule_id": str(rule.id),
+    }
+    parameters = {
+        "stage_version": "template-match-v2",
+        "detector": detector_parameters,
+        "fps_cap": float(fps_cap),
+        "decode_height": int(decode_height) if decode_height is not None else None,
+        "source_dimensions": [int(record.width), int(record.height)],
+        "ffmpeg_version": str(getattr(toolchain, "ffmpeg_version", "unknown")),
+    }
+    return cache_key(_path_fingerprint(source), "template_scan", parameters)
+
+
+def _decode_dimensions(width: int, height: int, decode_height: int | None) -> tuple[int, int]:
+    if decode_height is None or decode_height <= 0 or height <= decode_height:
+        return width, height
+    output_height = max(2, int(decode_height))
+    output_width = max(2, int(round(width * output_height / height)))
+    if output_width % 2:
+        output_width -= 1
+    return max(2, output_width), output_height
+
+
+def iter_full_frames(
+    toolchain: object,
+    source: Path,
+    *,
+    width: int,
+    height: int,
+    fps: float,
+    scale_width: int | None = None,
+    scale_height: int | None = None,
+) -> Iterable[tuple[float, np.ndarray]]:
     """Yield full BGR frames from FFmpeg without creating frame files."""
     if width < 1 or height < 1 or fps <= 0:
         raise ValueError("invalid video decode dimensions")
     ffmpeg = getattr(toolchain, "ffmpeg", toolchain)
-    command = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-i", str(source), "-map", "0:v:0", "-an", "-vf", f"fps={fps:.6f}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+    output_width = int(scale_width or width)
+    output_height = int(scale_height or height)
+    if output_width < 1 or output_height < 1:
+        raise ValueError("invalid scaled video dimensions")
+    filters = [f"fps={fps:.6f}"]
+    if (output_width, output_height) != (width, height):
+        filters.append(f"scale={output_width}:{output_height}:flags=fast_bilinear")
+    command = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-i", str(source), "-map", "0:v:0", "-an", "-vf", ",".join(filters), "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
-    size = width * height * 3
+    size = output_width * output_height * 3
     index = 0
     try:
         assert process.stdout is not None
@@ -176,7 +262,7 @@ def iter_full_frames(toolchain: object, source: Path, *, width: int, height: int
                 break
             if len(payload) != size:
                 raise RuntimeError(f"decoder returned a partial frame ({len(payload)} of {size} bytes)")
-            yield index / fps, np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3)).copy()
+            yield index / fps, np.frombuffer(payload, dtype=np.uint8).reshape((output_height, output_width, 3)).copy()
             index += 1
     finally:
         if process.stdout is not None:
@@ -190,12 +276,40 @@ def iter_full_frames(toolchain: object, source: Path, *, width: int, height: int
             raise RuntimeError(f"FFmpeg video decode failed ({code}): {detail}")
 
 
-def scan_template_source(record: object, rule: object, toolchain: object, *, progress: Callable[[int, str], None] | None = None) -> list[TemplateEvent]:
+def scan_template_source(
+    record: object,
+    rule: object,
+    toolchain: object,
+    *,
+    progress: Callable[[int, str], None] | None = None,
+    fps_cap: float = 30.0,
+    decode_height: int | None = None,
+    cache_dir: Path | None = None,
+    use_cache: bool = True,
+) -> list[TemplateEvent]:
     from .kill_truth.scanner import source_id_for_path
 
     detector = rule.detector
-    template_paths = [Path(value.get("file", value.get("path", "")) if isinstance(value, dict) else value) for value in detector.templates]
+    template_paths = [_path_value(value) for value in detector.templates]
     positive_paths = [Path(value) for value in detector.positive_samples if isinstance(value, (str, Path))]
+    cache_path: Path | None = None
+    expected_cache_key: str | None = None
+    if cache_dir is not None and use_cache:
+        expected_cache_key = _template_cache_key(
+            record,
+            rule,
+            toolchain,
+            fps_cap=fps_cap,
+            decode_height=decode_height,
+        )
+        cache_path = Path(cache_dir) / f"{expected_cache_key}.json"
+        cached = read_cached_json(cache_path, expected_cache_key)
+        if isinstance(cached, list):
+            events = [TemplateEvent.from_dict(item) for item in cached if isinstance(item, dict)]
+            if progress:
+                progress(100, f"template cache hit: {len(events)} events")
+            return events
+
     reference_height = None
     if positive_paths:
         positive_path = positive_paths[0]
@@ -212,6 +326,32 @@ def scan_template_source(record: object, rule: object, toolchain: object, *, pro
             reference_height = positive.shape[0]
     roi = tuple(float(detector.roi[key]) for key in ("x1", "y1", "x2", "y2"))
     threshold = float(detector.thresholds.get("template", 0.65))
-    fps = min(max(float(getattr(record, "fps", 30.0) or 30.0), 1.0), 30.0)
-    frames = iter_full_frames(toolchain, Path(record.file_path), width=int(record.width), height=int(record.height), fps=fps)
-    return scan_template_frames(frames, roi, template_paths, threshold=threshold, source_id=source_id_for_path(Path(record.file_path)), rule_id=rule.id, label=rule.label, reference_height=reference_height, duration=float(getattr(record, "duration", 0.0) or 0.0), progress=progress)
+    fps_limit = max(1.0, float(fps_cap))
+    fps = min(max(float(getattr(record, "fps", 30.0) or 30.0), 1.0), fps_limit)
+    source_width = int(record.width)
+    source_height = int(record.height)
+    decode_width, decode_height_value = _decode_dimensions(source_width, source_height, decode_height)
+    frames = iter_full_frames(
+        toolchain,
+        Path(record.file_path),
+        width=source_width,
+        height=source_height,
+        fps=fps,
+        scale_width=decode_width,
+        scale_height=decode_height_value,
+    )
+    events = scan_template_frames(
+        frames,
+        roi,
+        template_paths,
+        threshold=threshold,
+        source_id=source_id_for_path(Path(record.file_path)),
+        rule_id=rule.id,
+        label=rule.label,
+        reference_height=reference_height,
+        duration=float(getattr(record, "duration", 0.0) or 0.0),
+        progress=progress,
+    )
+    if cache_path is not None and expected_cache_key is not None:
+        write_cached_json(cache_path, expected_cache_key, [event.to_dict() for event in events])
+    return events

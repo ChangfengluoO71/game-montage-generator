@@ -79,6 +79,12 @@ v6_panel_disappear_s: 0.75
 v6_refinement_radius_s: 1.0
 v6_initial_search_roi: [0.25, 0.42, 0.66, 0.75]
 
+# Template-match fallback scanning uses a smaller decode stream and persists
+# detections so repeated editorial runs do not decode the same source again.
+template_scan_fps: 30.0
+template_decode_height: 720
+template_cache_enabled: true
+
 v2_excluded_ranges:
   - source_name: 'Battlefield 6 2026.09.03 - 14.43.43.02.DVR.mp4'
     start: 0.0

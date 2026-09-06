@@ -139,6 +139,9 @@ class PipelineConfig:
     v6_panel_disappear_s: float = 0.75
     v6_refinement_radius_s: float = 1.0
     v6_initial_search_roi: tuple[float, float, float, float] = (0.25, 0.42, 0.66, 0.75)
+    template_scan_fps: float = 30.0
+    template_decode_height: int = 720
+    template_cache_enabled: bool = True
 
     @property
     def analysis_dir(self) -> Path:
@@ -379,6 +382,10 @@ def load_config(path: Path) -> PipelineConfig:
     )))
     v5_sequence_context_s = _finite_float(raw.get("v5_sequence_context_s", 1.25), 1.25, 0.1, 10.0)
     v5_min_rapid_context_tail_s = _finite_float(raw.get("v5_min_rapid_context_tail_s", 0.25), 0.25, 0.0, 5.0)
+    try:
+        template_decode_height = max(240, min(2160, int(raw.get("template_decode_height", 720))))
+    except (TypeError, ValueError):
+        template_decode_height = 720
     target = raw.get("fast_montage_target", "music")
     if not isinstance(target, (str, int, float)):
         target = "music"
@@ -468,6 +475,9 @@ def load_config(path: Path) -> PipelineConfig:
         v6_panel_disappear_s=_finite_float(raw.get("v6_panel_disappear_s", 0.75), 0.75, 0.1, 5.0),
         v6_refinement_radius_s=_finite_float(raw.get("v6_refinement_radius_s", 1.0), 1.0, 0.1, 5.0),
         v6_initial_search_roi=tuple(float(item) for item in raw.get("v6_initial_search_roi", [0.25, 0.42, 0.66, 0.75])),
+        template_scan_fps=_finite_float(raw.get("template_scan_fps", 30.0), 30.0, 1.0, 30.0),
+        template_decode_height=template_decode_height,
+        template_cache_enabled=bool(raw.get("template_cache_enabled", True)),
     )
 
 
